@@ -1,10 +1,19 @@
 // State
 
+use core::fmt;
+
+#[derive(Debug)]
+enum ServerType {
+    Follower,
+    Candidate,
+    Leader(VolatileStateLeader),
+}
+
 #[derive(Debug)]
 pub struct State {
     persistent: PersistentState,
     volatile: VolatileState,
-    volatile_leader: Option<VolatileStateLeader>,
+    server_type: ServerType,
 }
 
 // Persistent State on all servers.
@@ -49,7 +58,7 @@ struct VolatileStateLeader {
 //
 
 #[derive(Debug)]
-struct LogEntry {
+pub struct LogEntry {
     // Command for state machine
     command: Command,
 
@@ -57,18 +66,31 @@ struct LogEntry {
     term: Term,
 }
 
-#[derive(Debug)]
 pub struct LogIndex(u32);
+
+impl fmt::Debug for LogIndex {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "LogIndex({})", self.0)
+    }
+}
 
 // Command for state machine
 #[derive(Debug)]
 struct Command;
 
-#[derive(Debug)]
 pub struct Term(u32);
+
+impl fmt::Debug for Term {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Term({})", self.0)
+    }
+}
 
 #[derive(Debug)]
 pub struct CandidateId(u32);
+
+#[derive(Debug)]
+pub struct ServerId(u32);
 
 //////////////////////////////////////////////
 //
@@ -87,10 +109,7 @@ impl State {
                 commit_index: LogIndex(0),
                 last_applied: LogIndex(0),
             },
-            volatile_leader: Option::from(VolatileStateLeader {
-                next_indexes: Vec::new(),
-                match_indexes: Vec::new(),
-            }),
+            server_type: ServerType::Follower,
         }
     }
 }
