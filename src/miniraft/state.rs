@@ -3,17 +3,28 @@
 use core::fmt;
 
 #[derive(Debug)]
-enum ServerType {
+pub struct Cluster {
+    servers: Vec<Server>,
+}
+
+#[derive(Debug)]
+struct Server {
+    id: ServerId,
+    state: State,
+}
+
+#[derive(Debug)]
+enum ServerKind {
     Follower,
     Candidate,
     Leader(VolatileStateLeader),
 }
 
 #[derive(Debug)]
-pub struct State {
+struct State {
     persistent: PersistentState,
     volatile: VolatileState,
-    server_type: ServerType,
+    kind: ServerKind,
 }
 
 // Persistent State on all servers.
@@ -89,13 +100,36 @@ impl fmt::Debug for Term {
 #[derive(Debug)]
 pub struct CandidateId(u32);
 
-#[derive(Debug)]
 pub struct ServerId(u32);
 
+impl fmt::Debug for ServerId {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "ServerId({})", self.0)
+    }
+}
 //////////////////////////////////////////////
 //
 // Implementation
 //
+
+impl Cluster {
+    pub fn new() -> Cluster {
+        Cluster {
+            servers: (1..=5)
+                .map(|id| Server::new(ServerId(id)))
+                .collect()
+        }
+    }
+}
+
+impl Server {
+    pub fn new(id: ServerId) -> Server {
+        Server {
+            id,
+            state: State::new(),
+        }
+    }
+}
 
 impl State {
     pub fn new() -> State {
@@ -109,7 +143,7 @@ impl State {
                 commit_index: LogIndex(0),
                 last_applied: LogIndex(0),
             },
-            server_type: ServerType::Follower,
+            kind: ServerKind::Follower,
         }
     }
 }
