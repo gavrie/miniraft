@@ -1,0 +1,7 @@
+[package]
+name = "miniraft"
+version = "0.1.0"
+authors = ["Gavrie Philipson <gavrie@redislabs.com>"]
+edition = "2018"
+
+[dependencies]
