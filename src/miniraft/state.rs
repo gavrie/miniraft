@@ -1,5 +1,3 @@
-// State
-
 use core::fmt;
 
 #[derive(Debug)]
@@ -10,27 +8,22 @@ pub struct Cluster {
 #[derive(Debug)]
 struct Server {
     id: ServerId,
-    state: State,
+    state: ServerState,
+    persistent: PersistentData,
+    volatile: VolatileData,
 }
 
 #[derive(Debug)]
-enum ServerKind {
+enum ServerState {
     Follower,
     Candidate,
-    Leader(VolatileStateLeader),
-}
-
-#[derive(Debug)]
-struct State {
-    persistent: PersistentState,
-    volatile: VolatileState,
-    kind: ServerKind,
+    Leader(VolatileDataForLeader),
 }
 
 // Persistent State on all servers.
 // (Updated on stable storage before responding to RPCs)
 #[derive(Debug)]
-struct PersistentState {
+struct PersistentData {
     // Latest Term server has seen (initialized to 0 on first boot, increases monotonically)
     current_term: Term,
 
@@ -43,7 +36,7 @@ struct PersistentState {
 
 // Volatile State on all servers.
 #[derive(Debug)]
-struct VolatileState {
+struct VolatileData {
     // Index of highest log entry known to be committed (initialized to 0, increases monotonically)
     commit_index: LogIndex,
 
@@ -53,7 +46,7 @@ struct VolatileState {
 
 // Volatile State on leaders (Reinitialized after election).
 #[derive(Debug)]
-struct VolatileStateLeader {
+struct VolatileDataForLeader {
     // For each server, index of the next log entry to send to that server
     // (initialized to leader last log index + 1)
     next_indexes: Vec<LogIndex>,
@@ -123,27 +116,31 @@ impl Cluster {
 }
 
 impl Server {
-    pub fn new(id: ServerId) -> Server {
-        Server {
+    pub fn new(id: ServerId) -> Self {
+        Self {
             id,
-            state: State::new(),
+            state: ServerState::Follower,
+            persistent: PersistentData::new(),
+            volatile: VolatileData::new(),
         }
     }
 }
 
-impl State {
-    pub fn new() -> State {
-        State {
-            persistent: PersistentState {
-                current_term: Term(0),
-                voted_for: None,
-                log: Vec::new(),
-            },
-            volatile: VolatileState {
-                commit_index: LogIndex(0),
-                last_applied: LogIndex(0),
-            },
-            kind: ServerKind::Follower,
+impl PersistentData {
+    fn new() -> Self {
+        Self {
+            current_term: Term(0),
+            voted_for: None,
+            log: Vec::new(),
+        }
+    }
+}
+
+impl VolatileData {
+    fn new() -> Self {
+        Self {
+            commit_index: LogIndex(0),
+            last_applied: LogIndex(0),
         }
     }
 }
