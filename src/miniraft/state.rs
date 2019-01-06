@@ -1,20 +1,7 @@
 use core::fmt;
 
 #[derive(Debug)]
-pub struct Cluster {
-    servers: Vec<Server>,
-}
-
-#[derive(Debug)]
-struct Server {
-    id: ServerId,
-    state: ServerState,
-    persistent: PersistentData,
-    volatile: VolatileData,
-}
-
-#[derive(Debug)]
-enum ServerState {
+pub enum ServerState {
     Follower,
     Candidate,
     Leader(VolatileDataForLeader),
@@ -23,7 +10,7 @@ enum ServerState {
 // Persistent State on all servers.
 // (Updated on stable storage before responding to RPCs)
 #[derive(Debug)]
-struct PersistentData {
+pub struct PersistentData {
     // Latest Term server has seen (initialized to 0 on first boot, increases monotonically)
     current_term: Term,
 
@@ -36,7 +23,7 @@ struct PersistentData {
 
 // Volatile State on all servers.
 #[derive(Debug)]
-struct VolatileData {
+pub struct VolatileData {
     // Index of highest log entry known to be committed (initialized to 0, increases monotonically)
     commit_index: LogIndex,
 
@@ -93,7 +80,8 @@ impl fmt::Debug for Term {
 #[derive(Debug)]
 pub struct CandidateId(u32);
 
-pub struct ServerId(u32);
+#[derive(Clone)]
+pub struct ServerId(pub u32);
 
 impl fmt::Debug for ServerId {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -105,29 +93,8 @@ impl fmt::Debug for ServerId {
 // Implementation
 //
 
-impl Cluster {
-    pub fn new() -> Cluster {
-        Cluster {
-            servers: (1..=5)
-                .map(|id| Server::new(ServerId(id)))
-                .collect()
-        }
-    }
-}
-
-impl Server {
-    pub fn new(id: ServerId) -> Self {
-        Self {
-            id,
-            state: ServerState::Follower,
-            persistent: PersistentData::new(),
-            volatile: VolatileData::new(),
-        }
-    }
-}
-
 impl PersistentData {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             current_term: Term(0),
             voted_for: None,
@@ -137,7 +104,7 @@ impl PersistentData {
 }
 
 impl VolatileData {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             commit_index: LogIndex(0),
             last_applied: LogIndex(0),
