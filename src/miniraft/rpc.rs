@@ -2,6 +2,7 @@ use super::state::*;
 
 // RPC
 
+#[derive(Debug)]
 pub enum Message {
     // Invoked by candidates to gather votes (§5.2)
     RequestVote,

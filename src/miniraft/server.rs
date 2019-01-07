@@ -1,7 +1,7 @@
 use std::thread;
 use std::time::Duration;
-use std::sync::mpsc;
 
+use crossbeam_channel::{Sender, Receiver, unbounded};
 use log::info;
 use rand::prelude::*;
 
@@ -16,8 +16,8 @@ pub struct Server {
     volatile: VolatileData,
     rng: ThreadRng,
     election_timeout: Duration,
-    sender: mpsc::Sender<Message>,
-    receiver: mpsc::Receiver<Message>,
+    sender: Sender<Message>,
+    receiver: Receiver<Message>,
 }
 
 #[derive(Debug)]
@@ -64,17 +64,17 @@ struct VolatileDataForLeader {
 }
 
 pub struct ServerChannels {
-    sender: mpsc::Sender<Message>,
-    receiver: mpsc::Receiver<Message>,
+    pub sender: Sender<Message>,
+    pub receiver: Receiver<Message>,
 }
 
 impl Server {
-    pub fn new(id: ServerId, channels_tx: mpsc::Sender<ServerChannels>) -> Self {
+    pub fn new(id: ServerId, channels_tx: Sender<ServerChannels>) -> Self {
         // Channel on which we send our messages
-        let (sender_tx, sender_rx) = mpsc::channel::<Message>();
+        let (sender_tx, sender_rx) = unbounded::<Message>();
 
         // Channel on which we receive our messages
-        let (receiver_tx, receiver_rx) = mpsc::channel::<Message>();
+        let (receiver_tx, receiver_rx) = unbounded::<Message>();
 
         let channels = ServerChannels {
             sender: receiver_tx,
@@ -129,6 +129,7 @@ impl Server {
         self.reset_election_timeout();
 
         // TODO: Send RequestVote RPCs to all other servers
+        self.sender.send(Message::RequestVote);
     }
 
     fn reset_election_timeout(&mut self) {
