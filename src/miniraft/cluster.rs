@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::error::Error;
 use std::thread;
 
 use crossbeam_channel::{unbounded, Select};
@@ -14,7 +15,7 @@ pub struct Cluster {
 }
 
 impl Cluster {
-    pub fn new(num_servers: u32) -> Cluster {
+    pub fn new(num_servers: u32) -> Result<Cluster, Box<dyn Error>> {
         let mut server_channels = HashMap::new();
 
         for id in 1..=num_servers {
@@ -22,18 +23,18 @@ impl Cluster {
             let (tx, rx) = unbounded();
 
             thread::spawn(move || {
-                let mut server = Server::new(server_id, tx);
-                server.start();
+                let mut server = Server::new(server_id, tx).unwrap();
+                server.start().unwrap();
             });
 
-            let channels = rx.recv().unwrap();
+            let channels = rx.recv()?;
             server_channels.insert(server_id, channels);
         }
 
-        Cluster { server_channels }
+        Ok(Cluster { server_channels })
     }
 
-    pub fn start(&self) {
+    pub fn start(&self) -> Result<(), Box<dyn Error>> {
         // Receive and send messages: Select on all channels and dispatch messages.
 
         let receivers: Vec<_> = self.server_channels
@@ -47,18 +48,19 @@ impl Cluster {
             .collect();
 
         loop {
-            let (sender_id, message) = Self::receive(&receivers);
+            let (sender_id, message) = Self::receive(&receivers)?;
             info!("Received message from {:?}: {:?}", sender_id, message);
 
             // Broadcast the message to all servers
             for &s in senders.iter() {
                 let message = message.clone();
-                s.send(message).unwrap();
+                s.send(message)?;
             }
         }
     }
 
-    fn receive(receivers: &[(ServerId, &Receiver<Message>)]) -> (ServerId, Message) {
+    fn receive(receivers: &[(ServerId, &Receiver<Message>)])
+               -> Result<(ServerId, Message), Box<dyn Error>> {
         let mut sel = Select::new();
 
         for (_, rx) in receivers {
@@ -67,8 +69,8 @@ impl Cluster {
 
         let oper = sel.select();
         let (server_id, rx) = receivers[oper.index()];
-        let message = oper.recv(rx).unwrap();
+        let message = oper.recv(rx)?;
 
-        (server_id, message)
+        Ok((server_id, message))
     }
 }

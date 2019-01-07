@@ -8,6 +8,7 @@ use rand::prelude::*;
 use super::state::*;
 use super::rpc::Message;
 use crate::miniraft::rpc::RequestVoteArguments;
+use std::error::Error;
 
 #[derive(Debug)]
 pub struct Server {
@@ -70,7 +71,8 @@ pub struct ServerChannels {
 }
 
 impl Server {
-    pub fn new(id: ServerId, channels_tx: Sender<ServerChannels>) -> Self {
+    pub fn new(id: ServerId, channels_tx: Sender<ServerChannels>)
+               -> Result<Self, Box<dyn Error>> {
         // Channel on which we send our messages
         let (sender_tx, sender_rx) = unbounded::<Message>();
 
@@ -82,7 +84,7 @@ impl Server {
             receiver: sender_rx,
         };
 
-        channels_tx.send(channels).unwrap();
+        channels_tx.send(channels)?;
 
         let mut server = Self {
             id,
@@ -96,17 +98,17 @@ impl Server {
         };
 
         server.reset_election_timeout();
-        server
+        Ok(server)
     }
 
-    pub fn start(&mut self) {
+    pub fn start(&mut self) -> Result<(), Box<dyn Error>> {
         info!("{:?}: Started server", self.id);
 
         loop {
             // TODO: Add sender id to message
             select! {
                 recv(self.receiver) -> message => {
-                    let message = message.unwrap();
+                    let message = message?;
                     info!("{:?}: Received message: {:?}", self.id, message);
                 },
                 default(Duration::from_millis(100)) => {
@@ -119,7 +121,7 @@ impl Server {
                     // TODO: Wait for RPC request or response, or election timeout
                     thread::sleep(self.election_timeout);
                     info!("{:?}: Election timed out after {:?}", self.id, self.election_timeout);
-                    self.start_election();
+                    self.start_election()?;
                 }
                 ServerState::Candidate => (),
                 ServerState::Leader(_) => (),
@@ -127,7 +129,7 @@ impl Server {
         }
     }
 
-    fn start_election(&mut self) {
+    fn start_election(&mut self) -> Result<(), Box<dyn Error>> {
         info!("{:?}: Becoming candidate", self.id);
         self.state = ServerState::Candidate;
 
@@ -146,7 +148,9 @@ impl Server {
                 last_log_index: LogIndex(0), // TODO
                 last_log_term: Term(0), // TODO
             })
-        ).unwrap();
+        )?;
+
+        Ok(())
     }
 
     fn reset_election_timeout(&mut self) {
