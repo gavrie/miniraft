@@ -33,7 +33,7 @@ pub struct VolatileData {
 
 // Volatile State on leaders (Reinitialized after election).
 #[derive(Debug)]
-struct VolatileDataForLeader {
+pub struct VolatileDataForLeader {
     // For each server, index of the next log entry to send to that server
     // (initialized to leader last log index + 1)
     next_indexes: Vec<LogIndex>,
