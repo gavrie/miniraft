@@ -2,10 +2,12 @@ use std::collections::HashMap;
 use std::thread;
 
 use crossbeam_channel::{unbounded, Select};
+use crossbeam_channel::Receiver;
 use log::info;
 
 use super::state::*;
 use super::server::{Server, ServerChannels};
+use super::rpc::Message;
 
 pub struct Cluster {
     server_channels: HashMap<ServerId, ServerChannels>,
@@ -34,22 +36,39 @@ impl Cluster {
     pub fn start(&self) {
         // Receive and send messages: Select on all channels and dispatch messages.
 
-        let mut receivers = Vec::new();
+        let receivers: Vec<_> = self.server_channels
+            .iter()
+            .map(|(&id, ServerChannels { receiver, sender: _ })| (id, receiver))
+            .collect();
+
+        let senders: Vec<_> = self.server_channels
+            .iter()
+            .map(|(_, ServerChannels { receiver: _, sender })| sender)
+            .collect();
+
+        loop {
+            let (sender_id, message) = Self::receive(&receivers);
+            info!("Received message from {:?}: {:?}", sender_id, message);
+
+            // Broadcast the message to all servers
+            for &s in senders.iter() {
+                let message = message.clone();
+                s.send(message).unwrap();
+            }
+        }
+    }
+
+    fn receive(receivers: &[(ServerId, &Receiver<Message>)]) -> (ServerId, Message) {
         let mut sel = Select::new();
-        for (server_id,
-            ServerChannels {
-                receiver: rx,
-                sender: _,
-            }) in self.server_channels.iter() {
-            receivers.push((server_id, rx));
+
+        for (_, rx) in receivers {
             sel.recv(rx);
         }
 
         let oper = sel.select();
-        let index = oper.index();
-        let (server_id, rx) = receivers[index];
+        let (server_id, rx) = receivers[oper.index()];
         let message = oper.recv(rx).unwrap();
 
-        info!("Received message from {:?}: {:?}", server_id, message);
+        (server_id, message)
     }
 }

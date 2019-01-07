@@ -1,7 +1,7 @@
 use core::fmt;
 use std::ops::AddAssign;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LogEntry {
     // Command for state machine
     command: Command,
@@ -20,7 +20,7 @@ impl fmt::Debug for LogIndex {
 }
 
 // Command for state machine
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Command;
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -38,9 +38,6 @@ impl AddAssign<u32> for Term {
         *self = Term(current + other)
     }
 }
-
-#[derive(Debug)]
-pub struct CandidateId(u32);
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub struct ServerId(pub u32);

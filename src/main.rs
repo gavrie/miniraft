@@ -1,13 +1,18 @@
-mod miniraft;
-
-use self::miniraft::cluster::Cluster;
+use std::error::Error;
 use std::thread;
 use std::time::Duration;
+
+#[macro_use]
+extern crate crossbeam_channel;
 
 use env_logger;
 use log::info;
 
-fn main() {
+mod miniraft;
+
+use self::miniraft::cluster::Cluster;
+
+fn main() -> Result<(), Box<dyn Error>> {
     env_logger::init();
 
     let num_servers = 3;

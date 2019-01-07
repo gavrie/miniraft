@@ -2,38 +2,32 @@ use super::state::*;
 
 // RPC
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Message {
     // Invoked by candidates to gather votes (§5.2)
-    RequestVote,
-    AppendEntries,
+    RequestVoteRequest(RequestVoteArguments),
+    RequestVoteResponse(RequestVoteResults),
+    AppendEntriesRequest(AppendEntriesArguments),
+    AppendEntriesResponse(AppendEntriesResults),
 }
 
-enum RequestVote {
-    Arguments(RequestVoteArguments),
-    Results(RequestVoteResults),
-}
-
-enum AppendEntries {
-    Arguments(AppendEntriesArguments),
-    Results(AppendEntriesResults),
-}
-
-struct RequestVoteArguments {
+#[derive(Debug, Clone)]
+pub struct RequestVoteArguments {
     // Candidate’s term
-    term: Term,
+    pub term: Term,
 
     // Candidate requesting vote
-    candidate_id: CandidateId,
+    pub candidate_id: ServerId,
 
     // Index of candidate’s last log entry (§5.4)
-    last_log_index: LogIndex,
+    pub last_log_index: LogIndex,
 
     // Term of candidate’s last log entry (§5.4)
-    last_log_term: Term,
+    pub last_log_term: Term,
 }
 
-struct RequestVoteResults {
+#[derive(Debug, Clone)]
+pub struct RequestVoteResults {
     // current_term, for candidate to update itself
     term: Term,
 
@@ -41,7 +35,8 @@ struct RequestVoteResults {
     vote_granted: bool,
 }
 
-struct AppendEntriesArguments {
+#[derive(Debug, Clone)]
+pub struct AppendEntriesArguments {
     // Leader's term
     term: Term,
 
@@ -61,7 +56,8 @@ struct AppendEntriesArguments {
     leader_commit: LogIndex,
 }
 
-struct AppendEntriesResults {
+#[derive(Debug, Clone)]
+pub struct AppendEntriesResults {
     // current_term, for leader to update itself
     term: Term,
 

@@ -2,11 +2,12 @@ use std::thread;
 use std::time::Duration;
 
 use crossbeam_channel::{Sender, Receiver, unbounded};
-use log::info;
+use log::{trace, info};
 use rand::prelude::*;
 
 use super::state::*;
 use super::rpc::Message;
+use crate::miniraft::rpc::RequestVoteArguments;
 
 #[derive(Debug)]
 pub struct Server {
@@ -35,7 +36,7 @@ struct PersistentData {
     current_term: Term,
 
     // CandidateId that received vote in current term (or None)
-    voted_for: Option<CandidateId>,
+    voted_for: Option<ServerId>,
 
     // Log entries
     log: Vec<LogEntry>,
@@ -102,7 +103,16 @@ impl Server {
         info!("{:?}: Started server", self.id);
 
         loop {
-            thread::sleep(Duration::from_millis(100));
+            // TODO: Add sender id to message
+            select! {
+                recv(self.receiver) -> message => {
+                    let message = message.unwrap();
+                    info!("{:?}: Received message: {:?}", self.id, message);
+                },
+                default(Duration::from_millis(100)) => {
+                    trace!("{:?}: Timed out", self.id);
+                },
+            }
 
             match self.state {
                 ServerState::Follower => {
@@ -129,7 +139,14 @@ impl Server {
         self.reset_election_timeout();
 
         // TODO: Send RequestVote RPCs to all other servers
-        self.sender.send(Message::RequestVote);
+        self.sender.send(Message::RequestVoteRequest(
+            RequestVoteArguments {
+                term: self.persistent.current_term,
+                candidate_id: self.id,
+                last_log_index: LogIndex(0), // TODO
+                last_log_term: Term(0), // TODO
+            })
+        ).unwrap();
     }
 
     fn reset_election_timeout(&mut self) {
