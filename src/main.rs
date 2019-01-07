@@ -12,7 +12,8 @@ fn main() {
 
     let num_servers = 3;
     info!("Creating a cluster with {} servers", num_servers);
-    let _cluster = Cluster::new(num_servers);
+    let cluster = Cluster::new(num_servers);
+    cluster.start();
 
     loop {
         thread::sleep(Duration::from_secs(60 * 60 * 24));
