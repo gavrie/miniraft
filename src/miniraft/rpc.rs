@@ -2,7 +2,7 @@ use super::state::*;
 
 // RPC
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum Message {
     // Invoked by candidates to gather votes (§5.2)
     RequestVoteRequest(RequestVoteArguments),
@@ -11,7 +11,7 @@ pub enum Message {
     AppendEntriesResponse(AppendEntriesResults),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct RequestVoteArguments {
     // Candidate’s term
     pub term: Term,
@@ -26,7 +26,7 @@ pub struct RequestVoteArguments {
     pub last_log_term: Term,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct RequestVoteResults {
     // current_term, for candidate to update itself
     term: Term,
@@ -35,7 +35,7 @@ pub struct RequestVoteResults {
     vote_granted: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct AppendEntriesArguments {
     // Leader's term
     term: Term,
@@ -56,7 +56,7 @@ pub struct AppendEntriesArguments {
     leader_commit: LogIndex,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct AppendEntriesResults {
     // current_term, for leader to update itself
     term: Term,

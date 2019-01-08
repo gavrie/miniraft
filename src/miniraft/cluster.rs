@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::thread;
+use std::sync::Arc;
 
 use crossbeam_channel::{unbounded, Select};
 use crossbeam_channel::Receiver;
@@ -53,14 +54,13 @@ impl Cluster {
 
             // Broadcast the message to all servers
             for &s in senders.iter() {
-                let message = message.clone();
-                s.send(message)?;
+                s.send(message.clone())?;
             }
         }
     }
 
-    fn receive(receivers: &[(ServerId, &Receiver<Message>)])
-               -> Result<(ServerId, Message), Box<dyn Error>> {
+    fn receive(receivers: &[(ServerId, &Receiver<Arc<Message>>)])
+               -> Result<(ServerId, Arc<Message>), Box<dyn Error>> {
         let mut sel = Select::new();
 
         for (_, rx) in receivers {

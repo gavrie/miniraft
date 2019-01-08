@@ -1,5 +1,7 @@
 use std::thread;
 use std::time::Duration;
+use std::error::Error;
+use std::sync::Arc;
 
 use crossbeam_channel::{Sender, Receiver, unbounded};
 use log::{trace, info};
@@ -8,7 +10,6 @@ use rand::prelude::*;
 use super::state::*;
 use super::rpc::Message;
 use crate::miniraft::rpc::RequestVoteArguments;
-use std::error::Error;
 
 #[derive(Debug)]
 pub struct Server {
@@ -18,8 +19,8 @@ pub struct Server {
     volatile: VolatileData,
     rng: ThreadRng,
     election_timeout: Duration,
-    sender: Sender<Message>,
-    receiver: Receiver<Message>,
+    sender: Sender<Arc<Message>>,
+    receiver: Receiver<Arc<Message>>,
 }
 
 #[derive(Debug)]
@@ -66,18 +67,18 @@ struct VolatileDataForLeader {
 }
 
 pub struct ServerChannels {
-    pub sender: Sender<Message>,
-    pub receiver: Receiver<Message>,
+    pub sender: Sender<Arc<Message>>,
+    pub receiver: Receiver<Arc<Message>>,
 }
 
 impl Server {
     pub fn new(id: ServerId, channels_tx: Sender<ServerChannels>)
                -> Result<Self, Box<dyn Error>> {
         // Channel on which we send our messages
-        let (sender_tx, sender_rx) = unbounded::<Message>();
+        let (sender_tx, sender_rx) = unbounded::<Arc<Message>>();
 
         // Channel on which we receive our messages
-        let (receiver_tx, receiver_rx) = unbounded::<Message>();
+        let (receiver_tx, receiver_rx) = unbounded::<Arc<Message>>();
 
         let channels = ServerChannels {
             sender: receiver_tx,
@@ -141,14 +142,17 @@ impl Server {
         self.reset_election_timeout();
 
         // TODO: Send RequestVote RPCs to all other servers
-        self.sender.send(Message::RequestVoteRequest(
+
+        let message = Message::RequestVoteRequest(
             RequestVoteArguments {
                 term: self.persistent.current_term,
                 candidate_id: self.id,
                 last_log_index: LogIndex(0), // TODO
                 last_log_term: Term(0), // TODO
-            })
-        )?;
+            });
+
+        let message = Arc::new(message);
+        self.sender.send(message)?;
 
         Ok(())
     }
