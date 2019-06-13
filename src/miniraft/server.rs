@@ -1,14 +1,14 @@
-use std::thread;
-use std::time::Duration;
 use std::error::Error;
 use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
-use crossbeam_channel::{Sender, Receiver, unbounded};
-use log::{trace, info};
+use crossbeam_channel::{unbounded, Receiver, Sender};
+use log::{info, trace};
 use rand::prelude::*;
 
-use super::state::*;
 use super::rpc::Message;
+use super::state::*;
 use crate::miniraft::rpc::RequestVoteArguments;
 
 #[derive(Debug)]
@@ -63,7 +63,6 @@ struct VolatileDataForLeader {
     // For each server, index of highest log entry known to be replicated on server
     // (initialized to 0, increases monotonically)
     match_indexes: Vec<LogIndex>,
-
 }
 
 pub struct ServerChannels {
@@ -72,8 +71,7 @@ pub struct ServerChannels {
 }
 
 impl Server {
-    pub fn new(id: ServerId, channels_tx: Sender<ServerChannels>)
-               -> Result<Self, Box<dyn Error>> {
+    pub fn new(id: ServerId, channels_tx: Sender<ServerChannels>) -> Result<Self, Box<dyn Error>> {
         // Channel on which we send our messages
         let (sender_tx, sender_rx) = unbounded::<Arc<Message>>();
 
@@ -112,6 +110,8 @@ impl Server {
                     let message = message?;
                     info!("{:?}: Received message: {:?}", self.id, message);
                 },
+                // FIXME: Instead of 'default', use an 'after' channel that will
+                // time out only if the election timed out?
                 default(Duration::from_millis(100)) => {
                     trace!("{:?}: Timed out", self.id);
                 },
@@ -121,7 +121,10 @@ impl Server {
                 ServerState::Follower => {
                     // TODO: Wait for RPC request or response, or election timeout
                     thread::sleep(self.election_timeout);
-                    info!("{:?}: Election timed out after {:?}", self.id, self.election_timeout);
+                    info!(
+                        "{:?}: Election timed out after {:?}",
+                        self.id, self.election_timeout
+                    );
                     self.start_election()?;
                 }
                 ServerState::Candidate => (),
@@ -143,13 +146,12 @@ impl Server {
 
         // TODO: Send RequestVote RPCs to all other servers
 
-        let message = Message::RequestVoteRequest(
-            RequestVoteArguments {
-                term: self.persistent.current_term,
-                candidate_id: self.id,
-                last_log_index: LogIndex(0), // TODO
-                last_log_term: Term(0), // TODO
-            });
+        let message = Message::RequestVoteRequest(RequestVoteArguments {
+            term: self.persistent.current_term,
+            candidate_id: self.id,
+            last_log_index: LogIndex(0), // TODO
+            last_log_term: Term(0),      // TODO
+        });
 
         let message = Arc::new(message);
         self.sender.send(message)?;

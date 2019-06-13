@@ -1,15 +1,15 @@
 use std::collections::HashMap;
 use std::error::Error;
-use std::thread;
 use std::sync::Arc;
+use std::thread;
 
-use crossbeam_channel::{unbounded, Select};
 use crossbeam_channel::Receiver;
+use crossbeam_channel::{unbounded, Select};
 use log::info;
 
-use super::state::*;
-use super::server::{Server, ServerChannels};
 use super::rpc::Message;
+use super::server::{Server, ServerChannels};
+use super::state::*;
 
 pub struct Cluster {
     server_channels: HashMap<ServerId, ServerChannels>,
@@ -38,14 +38,32 @@ impl Cluster {
     pub fn start(&self) -> Result<(), Box<dyn Error>> {
         // Receive and send messages: Select on all channels and dispatch messages.
 
-        let receivers: Vec<_> = self.server_channels
+        let receivers: Vec<_> = self
+            .server_channels
             .iter()
-            .map(|(&id, ServerChannels { receiver, sender: _ })| (id, receiver))
+            .map(
+                |(
+                    &id,
+                    ServerChannels {
+                        receiver,
+                        sender: _,
+                    },
+                )| (id, receiver),
+            )
             .collect();
 
-        let senders: Vec<_> = self.server_channels
+        let senders: Vec<_> = self
+            .server_channels
             .iter()
-            .map(|(_, ServerChannels { receiver: _, sender })| sender)
+            .map(
+                |(
+                    _,
+                    ServerChannels {
+                        receiver: _,
+                        sender,
+                    },
+                )| sender,
+            )
             .collect();
 
         loop {
@@ -54,13 +72,15 @@ impl Cluster {
 
             // Broadcast the message to all servers
             for &s in senders.iter() {
-                s.send(message.clone())?;
+                let message = Arc::clone(&message);
+                s.send(message)?;
             }
         }
     }
 
-    fn receive(receivers: &[(ServerId, &Receiver<Arc<Message>>)])
-               -> Result<(ServerId, Arc<Message>), Box<dyn Error>> {
+    fn receive(
+        receivers: &[(ServerId, &Receiver<Arc<Message>>)],
+    ) -> Result<(ServerId, Arc<Message>), Box<dyn Error>> {
         let mut sel = Select::new();
 
         for (_, rx) in receivers {

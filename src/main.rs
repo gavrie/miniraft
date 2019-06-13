@@ -5,8 +5,10 @@ use std::time::Duration;
 #[macro_use]
 extern crate crossbeam_channel;
 
+#[macro_use]
+extern crate log;
+
 use env_logger;
-use log::info;
 
 mod miniraft;
 
