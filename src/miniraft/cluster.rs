@@ -3,21 +3,23 @@ use std::error::Error;
 use std::sync::Arc;
 use std::thread;
 
-use crossbeam_channel::Receiver;
 use crossbeam_channel::{unbounded, Select};
+use crossbeam_channel::{Receiver, Sender};
 use log::info;
 
 use super::rpc::Message;
-use super::server::{Server, ServerChannels};
+use super::server::Server;
 use super::state::*;
 
 pub struct Cluster {
-    server_channels: HashMap<ServerId, ServerChannels>,
+    server_senders: HashMap<ServerId, Sender<Arc<Message>>>,
+    server_receivers: HashMap<ServerId, Receiver<Arc<Message>>>,
 }
 
 impl Cluster {
     pub fn new(num_servers: u32) -> Result<Cluster, Box<dyn Error>> {
-        let mut server_channels = HashMap::new();
+        let mut server_senders = HashMap::new();
+        let mut server_receivers = HashMap::new();
 
         for id in 1..=num_servers {
             let server_id = ServerId(id);
@@ -28,62 +30,39 @@ impl Cluster {
                 server.start().unwrap();
             });
 
-            let channels = rx.recv()?;
-            server_channels.insert(server_id, channels);
+            let stub_message = rx.recv()?;
+
+            server_senders.insert(server_id, stub_message.sender);
+            server_receivers.insert(server_id, stub_message.receiver);
         }
 
-        Ok(Cluster { server_channels })
+        Ok(Cluster {
+            server_senders,
+            server_receivers,
+        })
     }
 
     pub fn start(&self) -> Result<(), Box<dyn Error>> {
         // Receive and send messages: Select on all channels and dispatch messages.
 
-        let receivers: Vec<_> = self
-            .server_channels
-            .iter()
-            .map(
-                |(
-                    &id,
-                    ServerChannels {
-                        receiver,
-                        sender: _,
-                    },
-                )| (id, receiver),
-            )
-            .collect();
-
-        let senders: Vec<_> = self
-            .server_channels
-            .iter()
-            .map(
-                |(
-                    _,
-                    ServerChannels {
-                        receiver: _,
-                        sender,
-                    },
-                )| sender,
-            )
-            .collect();
-
         loop {
-            let (sender_id, message) = Self::receive(&receivers)?;
+            let (sender_id, message) = self.receive()?;
             info!("Received message from {:?}: {:?}", sender_id, message);
 
             // Broadcast the message to all servers
-            for &s in senders.iter() {
+            for (_id, sender) in self.server_senders.iter() {
                 let message = Arc::clone(&message);
-                s.send(message)?;
+                sender.send(message)?;
             }
         }
     }
 
-    fn receive(
-        receivers: &[(ServerId, &Receiver<Arc<Message>>)],
-    ) -> Result<(ServerId, Arc<Message>), Box<dyn Error>> {
+    fn receive(&self) -> Result<(ServerId, Arc<Message>), Box<dyn Error>> {
         let mut sel = Select::new();
 
-        for (_, rx) in receivers {
+        let mut receivers = vec![];
+        for (&server_id, rx) in self.server_receivers.iter() {
+            receivers.push((server_id, rx));
             sel.recv(rx);
         }
 

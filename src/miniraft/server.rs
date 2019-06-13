@@ -65,20 +65,21 @@ struct VolatileDataForLeader {
     match_indexes: Vec<LogIndex>,
 }
 
-pub struct ServerChannels {
+// Stub that is used to communicate with this server
+pub struct ServerStubMessage {
     pub sender: Sender<Arc<Message>>,
     pub receiver: Receiver<Arc<Message>>,
 }
 
 impl Server {
-    pub fn new(id: ServerId, channels_tx: Sender<ServerChannels>) -> Result<Self, Box<dyn Error>> {
+    pub fn new(id: ServerId, channels_tx: Sender<ServerStubMessage>) -> Result<Self, Box<dyn Error>> {
         // Channel on which we send our messages
         let (sender_tx, sender_rx) = unbounded::<Arc<Message>>();
 
         // Channel on which we receive our messages
         let (receiver_tx, receiver_rx) = unbounded::<Arc<Message>>();
 
-        let channels = ServerChannels {
+        let channels = ServerStubMessage {
             sender: receiver_tx,
             receiver: sender_rx,
         };
