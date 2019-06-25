@@ -47,7 +47,7 @@ impl Cluster {
 
         loop {
             let (sender_id, message) = self.receive()?;
-            info!("Received message from {:?}: {:?}", sender_id, message);
+            info!("<<< {:?}: {:?}", sender_id, message);
 
             // Broadcast the message to all servers
             for (_id, sender) in self.server_senders.iter() {

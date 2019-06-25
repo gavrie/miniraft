@@ -109,7 +109,7 @@ impl Server {
             select! {
                 recv(self.receiver) -> message => {
                     let message = message?;
-                    info!("{:?}: Received message: {:?}", self.id, message);
+                    info!("{:?}: <<< {:?}", self.id, message);
                 },
                 // FIXME: Instead of 'default', use an 'after' channel that will
                 // time out only if the election timed out?
@@ -155,6 +155,7 @@ impl Server {
         });
 
         let message = Arc::new(message);
+        info!("{:?}: >>> {:?}", self.id, message);
         self.sender.send(message)?;
 
         Ok(())

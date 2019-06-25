@@ -5,17 +5,16 @@ use std::time::Duration;
 #[macro_use]
 extern crate crossbeam_channel;
 
-#[macro_use]
-extern crate log;
-
+use log::info;
 use env_logger;
+use env_logger::Env;
 
 mod miniraft;
 
 use self::miniraft::cluster::Cluster;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    env_logger::init();
+    env_logger::init_from_env(Env::default().default_filter_or("info"));
 
     let num_servers = 3;
     info!("Creating a cluster with {} servers", num_servers);
