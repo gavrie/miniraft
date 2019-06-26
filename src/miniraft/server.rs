@@ -7,11 +7,9 @@ use crossbeam_channel::{unbounded, Receiver, Sender};
 use log::{info, trace};
 use rand::prelude::*;
 
-use super::rpc::{self, Message};
+use super::rpc::Message;
 use super::state::*;
-use std::marker::PhantomData;
-
-type SentMessage = Arc<Message>;
+use crate::miniraft::rpc::RequestVoteArguments;
 
 #[derive(Debug)]
 pub struct Server {
@@ -21,8 +19,8 @@ pub struct Server {
     volatile: VolatileData,
     rng: ThreadRng,
     election_timeout: Duration,
-    sender: Sender<SentMessage>,
-    receiver: Receiver<SentMessage>,
+    sender: Sender<Arc<Message>>,
+    receiver: Receiver<Arc<Message>>,
 }
 
 #[derive(Debug)]
@@ -69,17 +67,17 @@ struct VolatileDataForLeader {
 
 // Stub that is used to communicate with this server
 pub struct ServerStubMessage {
-    pub sender: Sender<SentMessage>,
-    pub receiver: Receiver<SentMessage>,
+    pub sender: Sender<Arc<Message>>,
+    pub receiver: Receiver<Arc<Message>>,
 }
 
 impl Server {
     pub fn new(id: ServerId, channels_tx: Sender<ServerStubMessage>) -> Result<Self, Box<dyn Error>> {
         // Channel on which we send our messages
-        let (sender_tx, sender_rx) = unbounded::<SentMessage>();
+        let (sender_tx, sender_rx) = unbounded::<Arc<Message>>();
 
         // Channel on which we receive our messages
-        let (receiver_tx, receiver_rx) = unbounded::<SentMessage>();
+        let (receiver_tx, receiver_rx) = unbounded::<Arc<Message>>();
 
         let channels = ServerStubMessage {
             sender: receiver_tx,
@@ -149,10 +147,12 @@ impl Server {
 
         // TODO: Send RequestVote RPCs to all other servers
 
-        let message = Message::RequestVoteRequest(rpc::Request::new(
-            self.persistent.current_term,
-            self.id,
-        ));
+        let message = Message::RequestVoteRequest(RequestVoteArguments {
+            term: self.persistent.current_term,
+            candidate_id: self.id,
+            last_log_index: LogIndex(0), // TODO
+            last_log_term: Term(0),      // TODO
+        });
 
         let message = Arc::new(message);
         info!("{:?}: >>> {:?}", self.id, message);
