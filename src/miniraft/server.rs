@@ -147,12 +147,10 @@ impl Server {
 
         // TODO: Send RequestVote RPCs to all other servers
 
-        let message = Message::RequestVoteRequest(RequestVoteArguments {
-            term: self.persistent.current_term,
-            candidate_id: self.id,
-            last_log_index: LogIndex(0), // TODO
-            last_log_term: Term(0),      // TODO
-        });
+        let message = Message::RequestVoteRequest(RequestVoteArguments::new(
+            self.persistent.current_term,
+            self.id,
+        ));
 
         let message = Arc::new(message);
         info!("{:?}: >>> {:?}", self.id, message);

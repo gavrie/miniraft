@@ -14,16 +14,27 @@ pub enum Message {
 #[derive(Debug)]
 pub struct RequestVoteArguments {
     // Candidate’s term
-    pub term: Term,
+    term: Term,
 
     // Candidate requesting vote
-    pub candidate_id: ServerId,
+    candidate_id: ServerId,
 
     // Index of candidate’s last log entry (§5.4)
-    pub last_log_index: LogIndex,
+    last_log_index: LogIndex,
 
     // Term of candidate’s last log entry (§5.4)
-    pub last_log_term: Term,
+    last_log_term: Term,
+}
+
+impl RequestVoteArguments {
+    pub fn new(term: Term, candidate_id: ServerId) -> Self {
+        Self {
+            term,
+            candidate_id,
+            last_log_index: LogIndex(0), // TODO
+            last_log_term: Term(0),      // TODO
+        }
+    }
 }
 
 #[derive(Debug)]
