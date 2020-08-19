@@ -1,75 +1,51 @@
-use std::collections::HashMap;
-use std::error::Error;
-use std::sync::Arc;
-use std::thread;
-
-use crossbeam_channel::{unbounded, Select};
-use crossbeam_channel::{Receiver, Sender};
+use async_std::sync::{self, Receiver, Sender};
+use async_std::task::JoinHandle;
 use log::info;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use super::rpc::Message;
 use super::server::Server;
 use super::state::*;
 
+struct ServerHandle {
+    server_tx: Sender<Arc<Message>>,
+    handle: JoinHandle<()>,
+}
+
 pub struct Cluster {
-    server_senders: HashMap<ServerId, Sender<Arc<Message>>>,
-    server_receivers: HashMap<ServerId, Receiver<Arc<Message>>>,
+    server_handles: HashMap<ServerId, ServerHandle>,
+    rx: Receiver<(ServerId, Arc<Message>)>,
 }
 
 impl Cluster {
-    pub fn new(num_servers: u32) -> Result<Cluster, Box<dyn Error>> {
-        let mut server_senders = HashMap::new();
-        let mut server_receivers = HashMap::new();
+    pub async fn new(num_servers: u32) -> Result<Cluster> {
+        let (tx, rx) = sync::channel(1);
 
-        for id in 1..=num_servers {
-            let server_id = ServerId(id);
-            let (tx, rx) = unbounded();
+        let server_handles: HashMap<_, _> = (1..=num_servers)
+            .map(|id| {
+                let server_id = ServerId(id);
 
-            thread::spawn(move || {
-                let mut server = Server::new(server_id, tx).unwrap();
-                server.start().unwrap();
-            });
+                let (server_tx, server_rx) = sync::channel(1);
+                let handle = Server::spawn(server_id, tx.clone(), server_rx);
 
-            let stub_message = rx.recv()?;
+                (server_id, ServerHandle { server_tx, handle })
+            })
+            .collect();
 
-            server_senders.insert(server_id, stub_message.sender);
-            server_receivers.insert(server_id, stub_message.receiver);
-        }
-
-        Ok(Cluster {
-            server_senders,
-            server_receivers,
-        })
+        Ok(Cluster { server_handles, rx })
     }
 
-    pub fn start(&self) -> Result<(), Box<dyn Error>> {
-        // Receive and send messages: Select on all channels and dispatch messages.
-
+    pub async fn run(&self) -> Result<()> {
         loop {
-            let (sender_id, message) = self.receive()?;
+            let (sender_id, message) = self.rx.recv().await?;
             info!("<<< {:?}: {:?}", sender_id, message);
 
             // Broadcast the message to all servers
-            for (_id, sender) in self.server_senders.iter() {
+            for (_id, handle) in self.server_handles.iter() {
                 let message = Arc::clone(&message);
-                sender.send(message)?;
+                handle.server_tx.send(message).await;
             }
         }
-    }
-
-    fn receive(&self) -> Result<(ServerId, Arc<Message>), Box<dyn Error>> {
-        let mut sel = Select::new();
-
-        let mut receivers = vec![];
-        for (&server_id, rx) in self.server_receivers.iter() {
-            receivers.push((server_id, rx));
-            sel.recv(rx);
-        }
-
-        let oper = sel.select();
-        let (server_id, rx) = receivers[oper.index()];
-        let message = oper.recv(rx)?;
-
-        Ok((server_id, message))
     }
 }

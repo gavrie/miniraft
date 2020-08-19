@@ -1,27 +1,26 @@
-use std::error::Error;
-use std::thread;
-use std::time::Duration;
-
-#[macro_use]
-extern crate crossbeam_channel;
-
-use log::info;
+use async_std::task;
 use env_logger;
 use env_logger::Env;
+use log::info;
+use std::time::Duration;
 
 mod miniraft;
 
 use self::miniraft::cluster::Cluster;
+use self::miniraft::state::Result;
 
-fn main() -> Result<(), Box<dyn Error>> {
-    env_logger::init_from_env(Env::default().default_filter_or("info"));
-
+async fn async_main() -> Result<()> {
     let num_servers = 3;
     info!("Creating a cluster with {} servers", num_servers);
-    let cluster = Cluster::new(num_servers)?;
-    cluster.start()?;
+    let cluster = Cluster::new(num_servers).await?;
+    cluster.run().await?;
 
     loop {
-        thread::sleep(Duration::from_secs(60 * 60 * 24));
+        task::sleep(Duration::from_secs(60 * 60 * 24)).await;
     }
+}
+
+fn main() -> Result<()> {
+    env_logger::init_from_env(Env::default().default_filter_or("info"));
+    task::block_on(async_main())
 }

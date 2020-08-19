@@ -1,5 +1,7 @@
-use core::fmt;
+use std::error::Error;
 use std::ops::AddAssign;
+
+pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 #[derive(Debug, Clone)]
 pub struct LogEntry {
@@ -10,27 +12,15 @@ pub struct LogEntry {
     term: Term,
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub struct LogIndex(pub u32);
-
-impl fmt::Debug for LogIndex {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "LogIndex({})", self.0)
-    }
-}
 
 // Command for state machine
 #[derive(Debug, Clone)]
 struct Command;
 
-#[derive(Copy, Clone, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Term(pub u32);
-
-impl fmt::Debug for Term {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Term({})", self.0)
-    }
-}
 
 impl AddAssign<u32> for Term {
     fn add_assign(&mut self, other: u32) {
@@ -39,11 +29,5 @@ impl AddAssign<u32> for Term {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ServerId(pub u32);
-
-impl fmt::Debug for ServerId {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "ServerId({})", self.0)
-    }
-}

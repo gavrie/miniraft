@@ -1,34 +1,29 @@
-use std::error::Error;
-use std::sync::Arc;
-use std::thread;
-use std::time::Duration;
-
-use crossbeam_channel::{unbounded, Receiver, Sender};
+use async_std::future;
+use async_std::sync::{Receiver, Sender};
+use async_std::task;
+use async_std::task::JoinHandle;
 use log::{info, trace};
 use rand::prelude::*;
+use std::sync::Arc;
+use std::time::Duration;
 
 use super::rpc::Message;
 use super::state::*;
 use crate::miniraft::rpc::RequestVoteArguments;
 
-#[derive(Debug)]
-pub struct Server {
-    id: ServerId,
-    state: ServerState,
-    persistent: PersistentData,
-    volatile: VolatileData,
-    rng: ThreadRng,
-    election_timeout: Duration,
-    sender: Sender<Arc<Message>>,
-    receiver: Receiver<Arc<Message>>,
-}
+//////////////////////////////////
 
-#[derive(Debug)]
-enum ServerState {
-    Follower,
-    Candidate,
-    Leader(VolatileDataForLeader),
-}
+trait ServerState {}
+
+struct Follower;
+struct Candidate;
+struct Leader(VolatileDataForLeader);
+
+impl ServerState for Follower {}
+impl ServerState for Candidate {}
+impl ServerState for Leader {}
+
+//////////////////////////////////
 
 // Persistent State on all servers.
 // (Updated on stable storage before responding to RPCs)
@@ -65,79 +60,104 @@ struct VolatileDataForLeader {
     match_indexes: Vec<LogIndex>,
 }
 
-// Stub that is used to communicate with this server
-pub struct ServerStubMessage {
-    pub sender: Sender<Arc<Message>>,
-    pub receiver: Receiver<Arc<Message>>,
+//////////////////////////////////
+
+#[derive(Debug)]
+pub struct Server<S: ServerState> {
+    state: S,
+    data: ServerData,
 }
 
-impl Server {
-    pub fn new(id: ServerId, channels_tx: Sender<ServerStubMessage>) -> Result<Self, Box<dyn Error>> {
-        // Channel on which we send our messages
-        let (sender_tx, sender_rx) = unbounded::<Arc<Message>>();
+struct ServerData {
+    id: ServerId,
+    persistent: PersistentData,
+    volatile: VolatileData,
+    rng: ThreadRng,
+    election_timeout: Duration,
+    sender: Sender<(ServerId, Arc<Message>)>,
+    receiver: Receiver<Arc<Message>>,
+}
 
-        // Channel on which we receive our messages
-        let (receiver_tx, receiver_rx) = unbounded::<Arc<Message>>();
-
-        let channels = ServerStubMessage {
-            sender: receiver_tx,
-            receiver: sender_rx,
-        };
-
-        channels_tx.send(channels)?;
-
+impl Server<Follower> {
+    pub fn spawn(
+        id: ServerId,
+        sender: Sender<(ServerId, Arc<Message>)>,
+        receiver: Receiver<Arc<Message>>,
+    ) -> JoinHandle<()> {
         let mut server = Self {
-            id,
-            state: ServerState::Follower,
-            persistent: PersistentData::new(),
-            volatile: VolatileData::new(),
-            rng: thread_rng(),
-            election_timeout: Default::default(),
-            sender: sender_tx,
-            receiver: receiver_rx,
+            state: Follower,
+            data: ServerData {
+                id,
+                persistent: PersistentData::new(),
+                volatile: VolatileData::new(),
+                rng: thread_rng(),
+                election_timeout: Default::default(),
+                sender,
+                receiver,
+            },
         };
 
         server.reset_election_timeout();
-        Ok(server)
+
+        task::spawn(async move {
+            server.run().unwrap();
+        })
     }
 
-    pub fn start(&mut self) -> Result<(), Box<dyn Error>> {
+    pub async fn run(&mut self) -> Result<()> {
         info!("{:?}: Started server", self.id);
 
         loop {
-            // TODO: Add sender id to message
-            select! {
-                recv(self.receiver) -> message => {
-                    let message = message?;
+            // FIXME: Instead of a fixed timeout, use an 'after' channel that will
+            // time out only if the election timed out?
+            match future::timeout(Duration::from_millis(100), self.receiver.recv()).await {
+                Ok(Ok(message)) => {
                     info!("{:?}: <<< {:?}", self.id, message);
-                },
-                // FIXME: Instead of 'default', use an 'after' channel that will
-                // time out only if the election timed out?
-                default(Duration::from_millis(100)) => {
+                }
+                Ok(Err(e)) => return Err(e)?,
+                Err(_) => {
                     trace!("{:?}: Timed out", self.id);
-                },
+                }
             }
 
-            match self.state {
-                ServerState::Follower => {
-                    // TODO: Wait for RPC request or response, or election timeout
-                    thread::sleep(self.election_timeout);
-                    info!(
-                        "{:?}: Election timed out after {:?}",
-                        self.id, self.election_timeout
-                    );
-                    self.start_election()?;
-                }
-                ServerState::Candidate => (),
-                ServerState::Leader(_) => (),
-            }
+            self.run2(); // TODO: Check Result
         }
     }
 
-    fn start_election(&mut self) -> Result<(), Box<dyn Error>> {
-        info!("{:?}: Becoming candidate", self.id);
-        self.state = ServerState::Candidate;
+    async fn run2(&mut self) -> Result<Server<Candidate>> {
+        // TODO: Wait for RPC request or response, or election timeout
 
+        task::sleep(self.election_timeout).await;
+        info!(
+            "{:?}: Election timed out after {:?}",
+            self.id, self.election_timeout
+        );
+
+        Ok(self.become_candidate())
+    }
+
+    fn become_candidate(self) -> Server<Candidate> {
+        info!("{:?}: Becoming candidate", self.id);
+
+        // TODO: Transition Server<Follower> to ServerState<Candidate>.
+        // Transition by calling a method instead of by setting state explicitly.
+        // This will allow us to ensure the transition is a valid one.
+        Server {
+            state: Candidate,
+            data: self.data,
+        }
+    }
+
+    fn reset_election_timeout(&mut self) {
+        let election_timeout = self.rng.gen_range(150, 300);
+        self.election_timeout = Duration::from_millis(election_timeout);
+    }
+}
+
+impl Server<Candidate> {
+    fn run(&mut self) {}
+
+    fn start_election(&mut self) -> Result<()> {
         // Starting election:
         self.persistent.current_term += 1;
 
@@ -158,11 +178,10 @@ impl Server {
 
         Ok(())
     }
+}
 
-    fn reset_election_timeout(&mut self) {
-        let election_timeout = self.rng.gen_range(150, 300);
-        self.election_timeout = Duration::from_millis(election_timeout);
-    }
+impl Server<Leader> {
+    fn run(&mut self) {}
 }
 
 impl PersistentData {
