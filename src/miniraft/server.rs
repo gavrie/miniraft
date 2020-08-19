@@ -1,8 +1,8 @@
 use async_std::future;
-use async_std::sync::{Receiver, Sender};
+use async_std::sync::{self, Receiver, Sender};
 use async_std::task;
 use async_std::task::JoinHandle;
-use log::{info, trace};
+use log::info;
 use rand::prelude::*;
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,15 +13,14 @@ use crate::miniraft::rpc::RequestVoteArguments;
 
 //////////////////////////////////
 
-trait ServerState {}
-
 struct Follower;
 struct Candidate;
 struct Leader(VolatileDataForLeader);
 
-impl ServerState for Follower {}
-impl ServerState for Candidate {}
-impl ServerState for Leader {}
+pub trait IsServerState {}
+impl IsServerState for Follower {}
+impl IsServerState for Candidate {}
+impl IsServerState for Leader {}
 
 //////////////////////////////////
 
@@ -62,104 +61,130 @@ struct VolatileDataForLeader {
 
 //////////////////////////////////
 
+pub struct Server {
+    pub server_tx: Sender<Arc<Message>>,
+    handle: JoinHandle<()>,
+}
+
+impl Server {
+    pub fn new(id: ServerId, cluster_tx: Sender<(ServerId, Arc<Message>)>) -> Self {
+        let (server_tx, server_rx) = sync::channel(1);
+
+        info!("{:?}: Started server", id);
+
+        let handle = task::spawn(async move {
+            let mut state = ServerState::Follower(State::new(id, cluster_tx, server_rx));
+            loop {
+                state = state.next().await;
+            }
+        });
+
+        Self { server_tx, handle }
+    }
+}
+
+enum ServerState {
+    Follower(State<Follower>),
+    Candidate(State<Candidate>),
+    Leader(State<Leader>),
+}
+
+impl ServerState {
+    async fn next(self) -> Self {
+        use ServerState::*;
+        match self {
+            Follower(state) => Candidate(state.run().await),
+            server_state => server_state,
+        }
+    }
+}
+
 #[derive(Debug)]
-pub struct Server<S: ServerState> {
+pub struct State<S: IsServerState> {
     state: S,
     data: ServerData,
 }
 
+#[derive(Debug)]
 struct ServerData {
     id: ServerId,
     persistent: PersistentData,
     volatile: VolatileData,
-    rng: ThreadRng,
     election_timeout: Duration,
     sender: Sender<(ServerId, Arc<Message>)>,
     receiver: Receiver<Arc<Message>>,
 }
 
-impl Server<Follower> {
-    pub fn spawn(
+impl<S: IsServerState> State<S> {
+    fn reset_election_timeout(&mut self) {
+        let election_timeout = thread_rng().gen_range(150, 300);
+        self.data.election_timeout = Duration::from_millis(election_timeout);
+    }
+}
+
+impl State<Follower> {
+    pub fn new(
         id: ServerId,
-        sender: Sender<(ServerId, Arc<Message>)>,
+        cluster_tx: Sender<(ServerId, Arc<Message>)>,
         receiver: Receiver<Arc<Message>>,
-    ) -> JoinHandle<()> {
-        let mut server = Self {
+    ) -> Self {
+        let mut state = Self {
             state: Follower,
             data: ServerData {
                 id,
                 persistent: PersistentData::new(),
                 volatile: VolatileData::new(),
-                rng: thread_rng(),
                 election_timeout: Default::default(),
-                sender,
+                sender: cluster_tx,
                 receiver,
             },
         };
 
-        server.reset_election_timeout();
+        state.reset_election_timeout();
 
-        task::spawn(async move {
-            server.run().unwrap();
-        })
+        state
     }
 
-    pub async fn run(&mut self) -> Result<()> {
-        info!("{:?}: Started server", self.id);
+    async fn run(self) -> State<Candidate> {
+        // Wait for RPC request or response, or election timeout
 
-        loop {
-            // FIXME: Instead of a fixed timeout, use an 'after' channel that will
-            // time out only if the election timed out?
-            match future::timeout(Duration::from_millis(100), self.receiver.recv()).await {
-                Ok(Ok(message)) => {
-                    info!("{:?}: <<< {:?}", self.id, message);
-                }
-                Ok(Err(e)) => return Err(e)?,
-                Err(_) => {
-                    trace!("{:?}: Timed out", self.id);
-                }
+        let message = future::timeout(self.data.election_timeout, self.data.receiver.recv()).await;
+
+        match message {
+            Ok(Ok(message)) => {
+                info!("{:?}: <<< {:?}", self.data.id, message);
             }
-
-            self.run2(); // TODO: Check Result
+            Ok(Err(e)) => panic!("{}", e),
+            Err(_) => {
+                info!(
+                    "{:?}: Election timed out after {:?}",
+                    self.data.id, self.data.election_timeout
+                );
+            }
         }
+
+        self.become_candidate()
     }
 
-    async fn run2(&mut self) -> Result<Server<Candidate>> {
-        // TODO: Wait for RPC request or response, or election timeout
+    fn become_candidate(self) -> State<Candidate> {
+        info!("{:?}: Becoming candidate", self.data.id);
 
-        task::sleep(self.election_timeout).await;
-        info!(
-            "{:?}: Election timed out after {:?}",
-            self.id, self.election_timeout
-        );
-
-        Ok(self.become_candidate())
-    }
-
-    fn become_candidate(self) -> Server<Candidate> {
-        info!("{:?}: Becoming candidate", self.id);
-
-        // TODO: Transition Server<Follower> to ServerState<Candidate>.
+        // TODO: Transition Server<Follower> to Server<Candidate>.
         // Transition by calling a method instead of by setting state explicitly.
         // This will allow us to ensure the transition is a valid one.
-        Server {
+        State {
             state: Candidate,
             data: self.data,
         }
     }
-
-    fn reset_election_timeout(&mut self) {
-        let election_timeout = self.rng.gen_range(150, 300);
-        self.election_timeout = Duration::from_millis(election_timeout);
-    }
 }
 
-impl Server<Candidate> {
+impl State<Candidate> {
     fn run(&mut self) {}
 
-    fn start_election(&mut self) -> Result<()> {
+    async fn start_election(&mut self) -> Result<()> {
         // Starting election:
-        self.persistent.current_term += 1;
+        self.data.persistent.current_term += 1;
 
         // TODO: Vote for self
 
@@ -168,19 +193,19 @@ impl Server<Candidate> {
         // TODO: Send RequestVote RPCs to all other servers
 
         let message = Message::RequestVoteRequest(RequestVoteArguments::new(
-            self.persistent.current_term,
-            self.id,
+            self.data.persistent.current_term,
+            self.data.id,
         ));
 
         let message = Arc::new(message);
-        info!("{:?}: >>> {:?}", self.id, message);
-        self.sender.send(message)?;
+        info!("{:?}: >>> {:?}", self.data.id, message);
+        self.data.sender.send((self.data.id, message)).await;
 
         Ok(())
     }
 }
 
-impl Server<Leader> {
+impl State<Leader> {
     fn run(&mut self) {}
 }
 
