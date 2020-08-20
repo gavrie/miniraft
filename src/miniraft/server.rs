@@ -154,6 +154,10 @@ impl ServerState {
 
                                         // Do we have a majority vote?
                                         if num_votes >= num_servers / 2 + 1 {
+                                            info!(
+                                                "{:?}: Got {}/{} votes",
+                                                state.data.id, num_votes, num_servers
+                                            );
                                             return Leader(state.become_leader());
                                         }
                                     }
