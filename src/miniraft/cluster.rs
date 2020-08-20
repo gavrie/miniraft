@@ -6,7 +6,7 @@ use super::state::*;
 use crate::miniraft::rpc::{FramedMessage, Target};
 
 pub struct Cluster {
-    servers: HashMap<ServerId, Server>,
+    pub servers: HashMap<ServerId, Server>,
     rx: Receiver<FramedMessage>,
 }
 

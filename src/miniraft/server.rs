@@ -2,6 +2,7 @@ use async_std::prelude::*;
 use async_std::sync::{self, Receiver, Sender};
 use async_std::task;
 use async_std::task::JoinHandle;
+use log::debug;
 use log::info;
 use rand::prelude::*;
 use std::sync::Arc;
@@ -9,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use super::rpc::Message;
 use super::state::*;
-use crate::miniraft::rpc::{FramedMessage, RequestVoteArguments, Target};
+use crate::miniraft::rpc::{FramedMessage, RequestVoteArguments, RequestVoteResults, Target};
 
 //////////////////////////////////
 
@@ -63,7 +64,7 @@ struct VolatileDataForLeader {
 
 pub struct Server {
     pub server_tx: Sender<FramedMessage>,
-    handle: JoinHandle<()>,
+    pub handle: JoinHandle<()>,
 }
 
 impl Server {
@@ -104,7 +105,17 @@ impl ServerState {
                 while let Some(event) = events.next().await {
                     match event {
                         Event::FramedMessage(frame) => {
-                            info!("{:?}: <<< {:?}", state.data.id, frame.message);
+                            debug!("{:?}: <<< {:?}", state.data.id, frame.message);
+                            use Message::*;
+
+                            match frame.message.as_ref() {
+                                RequestVoteRequest(args) => {
+                                    state.vote(args).await;
+                                }
+                                RequestVoteResponse(_results) => {}
+                                AppendEntriesRequest(_args) => {}
+                                AppendEntriesResponse(_results) => {}
+                            }
                         }
                         Event::ElectionTimeout(duration) => {
                             info!(
@@ -119,14 +130,40 @@ impl ServerState {
             }
 
             Candidate(state) => {
+                let num_servers = 3; // FIXME: Don't hardcode but get from Cluster
+                let mut num_votes = 0;
                 let mut events = state.events();
+
                 while let Some(event) = events.next().await {
                     match event {
                         Event::FramedMessage(frame) => {
-                            info!("{:?}: <<< {:?}", state.data.id, frame.message);
+                            debug!("{:?}: <<< {:?}", state.data.id, frame.message);
+                            use Message::*;
+
+                            match frame.message.as_ref() {
+                                RequestVoteRequest(args) => {
+                                    state.vote(args).await;
+                                }
+                                RequestVoteResponse(results) => {
+                                    if results.vote_granted {
+                                        info!(
+                                            "{:?}: Received vote from {:?}",
+                                            state.data.id, frame.source
+                                        );
+                                        num_votes += 1;
+
+                                        // Do we have a majority vote?
+                                        if num_votes >= num_servers / 2 + 1 {
+                                            return Leader(state.become_leader());
+                                        }
+                                    }
+                                }
+                                AppendEntriesRequest(_args) => {}
+                                AppendEntriesResponse(_results) => {}
+                            }
                         }
                         Event::ElectionTimeout(duration) => {
-                            info!(
+                            debug!(
                                 "{:?}: Election timed out after {:?}, starting new election",
                                 state.data.id, duration,
                             );
@@ -134,6 +171,7 @@ impl ServerState {
                         }
                     }
                 }
+
                 panic!("should not get here");
             }
 
@@ -142,10 +180,20 @@ impl ServerState {
                 while let Some(event) = events.next().await {
                     match event {
                         Event::FramedMessage(frame) => {
-                            info!("{:?}: <<< {:?}", state.data.id, frame.message);
+                            debug!("{:?}: <<< {:?}", state.data.id, frame.message);
+                            use Message::*;
+
+                            match frame.message.as_ref() {
+                                RequestVoteRequest(args) => {
+                                    state.vote(args).await;
+                                }
+                                RequestVoteResponse(_results) => {}
+                                AppendEntriesRequest(_args) => {}
+                                AppendEntriesResponse(_results) => {}
+                            }
                         }
                         Event::ElectionTimeout(duration) => {
-                            info!(
+                            debug!(
                                 "{:?}: Election timed out after {:?}",
                                 state.data.id, duration,
                             );
@@ -201,7 +249,7 @@ impl<S: IsServerState> State<S> {
     }
 
     async fn send_message(&self, message: Message, target: Target) {
-        info!("{:?}: >>> [{:?}] {:?}", self.data.id, Target::All, message);
+        info!("{:?}: >>> [{:?}] {:?}", self.data.id, target, message);
 
         self.data
             .sender
@@ -212,12 +260,39 @@ impl<S: IsServerState> State<S> {
             })
             .await;
     }
+
+    async fn vote(&self, args: &RequestVoteArguments) {
+        let voted_for = self.data.persistent.voted_for;
+        let vote_granted = {
+            if args.term < self.data.persistent.current_term {
+                false
+            } else {
+                (voted_for == None || voted_for == Some(args.candidate_id)) && {
+                    // TODO: Check if candidate's log is at least as up-to-date as receiver's log
+                    true
+                }
+            }
+        };
+
+        let server_id = args.candidate_id;
+        info!(
+            "{:?}: Voting for {:?}: granted={}",
+            self.data.id, server_id, vote_granted
+        );
+
+        let message = Message::RequestVoteResponse(RequestVoteResults {
+            term: self.data.persistent.current_term,
+            vote_granted,
+        });
+
+        self.send_message(message, Target::Server(server_id)).await;
+    }
 }
 
 impl State<Follower> {
     pub fn new(
         id: ServerId,
-        cluster_tx: Sender<FramedMessage>,
+        sender: Sender<FramedMessage>,
         receiver: Receiver<FramedMessage>,
     ) -> Self {
         let mut state = Self {
@@ -227,7 +302,7 @@ impl State<Follower> {
                 persistent: PersistentData::new(),
                 volatile: VolatileData::new(),
                 election_timeout: sync::channel(1).1,
-                sender: cluster_tx,
+                sender,
                 receiver,
             },
         };
@@ -270,6 +345,17 @@ impl State<Candidate> {
 
         self
     }
+
+    fn become_leader(self) -> State<Leader> {
+        info!("{:?}: Becoming leader", self.data.id);
+
+        let state = State {
+            state: Leader(VolatileDataForLeader::new()),
+            data: self.data,
+        };
+
+        state
+    }
 }
 
 impl State<Leader> {}
@@ -289,6 +375,15 @@ impl VolatileData {
         Self {
             commit_index: LogIndex(0),
             last_applied: LogIndex(0),
+        }
+    }
+}
+
+impl VolatileDataForLeader {
+    fn new() -> Self {
+        Self {
+            next_indexes: vec![],
+            match_indexes: vec![],
         }
     }
 }

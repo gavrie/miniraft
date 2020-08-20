@@ -19,7 +19,7 @@ pub struct LogIndex(pub u32);
 #[derive(Debug, Clone)]
 struct Command;
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd)]
 pub struct Term(pub u32);
 
 impl AddAssign<u32> for Term {

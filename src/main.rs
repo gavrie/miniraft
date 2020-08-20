@@ -2,7 +2,6 @@ use async_std::task;
 use env_logger;
 use env_logger::Env;
 use log::info;
-use std::time::Duration;
 
 mod miniraft;
 
@@ -15,9 +14,11 @@ async fn async_main() -> Result<()> {
     let cluster = Cluster::new(num_servers).await?;
     cluster.run().await?;
 
-    loop {
-        task::sleep(Duration::from_secs(60 * 60 * 24)).await;
+    for (_server_id, server) in cluster.servers {
+        server.handle.await;
     }
+
+    Ok(())
 }
 
 fn main() -> Result<()> {

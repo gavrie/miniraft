@@ -27,10 +27,10 @@ pub struct FramedMessage {
 #[derive(Debug)]
 pub struct RequestVoteArguments {
     // Candidate’s term
-    term: Term,
+    pub term: Term,
 
     // Candidate requesting vote
-    candidate_id: ServerId,
+    pub candidate_id: ServerId,
 
     // Index of candidate’s last log entry (§5.4)
     last_log_index: LogIndex,
@@ -53,10 +53,10 @@ impl RequestVoteArguments {
 #[derive(Debug)]
 pub struct RequestVoteResults {
     // current_term, for candidate to update itself
-    term: Term,
+    pub term: Term,
 
     // true means candidate received vote
-    vote_granted: bool,
+    pub vote_granted: bool,
 }
 
 #[derive(Debug)]
