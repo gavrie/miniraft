@@ -90,7 +90,7 @@ enum ServerState {
 }
 
 enum Event {
-    Timeout(Duration),
+    ElectionTimeout(Duration),
     FramedMessage(FramedMessage),
 }
 
@@ -100,37 +100,59 @@ impl ServerState {
 
         match self {
             Follower(state) => {
-                // Wait for RPC request or response, or election timeout
-                let messages = state.data.receiver.clone().map(Event::FramedMessage);
-                let timeouts = state.data.election_timeout.clone().map(Event::Timeout);
-                let mut events = timeouts.merge(messages);
-
+                let mut events = state.events();
                 while let Some(event) = events.next().await {
                     match event {
                         Event::FramedMessage(frame) => {
                             info!("{:?}: <<< {:?}", state.data.id, frame.message);
                         }
-                        Event::Timeout(duration) => {
+                        Event::ElectionTimeout(duration) => {
                             info!(
-                                "{:?}: Election timed out after {:?}",
+                                "{:?}: Election timed out after {:?}, converting to candidate",
                                 state.data.id, duration,
                             );
                             return Candidate(state.become_candidate().await);
                         }
                     }
                 }
-
                 panic!("should not get here");
             }
 
             Candidate(state) => {
-                task::sleep(Duration::from_secs(3600)).await;
-                Candidate(state)
+                let mut events = state.events();
+                while let Some(event) = events.next().await {
+                    match event {
+                        Event::FramedMessage(frame) => {
+                            info!("{:?}: <<< {:?}", state.data.id, frame.message);
+                        }
+                        Event::ElectionTimeout(duration) => {
+                            info!(
+                                "{:?}: Election timed out after {:?}, starting new election",
+                                state.data.id, duration,
+                            );
+                            return Candidate(state.start_election().await);
+                        }
+                    }
+                }
+                panic!("should not get here");
             }
 
             Leader(state) => {
-                task::sleep(Duration::from_secs(3600)).await;
-                Leader(state)
+                let mut events = state.events();
+                while let Some(event) = events.next().await {
+                    match event {
+                        Event::FramedMessage(frame) => {
+                            info!("{:?}: <<< {:?}", state.data.id, frame.message);
+                        }
+                        Event::ElectionTimeout(duration) => {
+                            info!(
+                                "{:?}: Election timed out after {:?}",
+                                state.data.id, duration,
+                            );
+                        }
+                    }
+                }
+                panic!("should not get here");
             }
         }
     }
@@ -164,6 +186,31 @@ impl<S: IsServerState> State<S> {
             task::sleep(timeout).await;
             tx.send(start.elapsed()).await;
         });
+    }
+
+    fn events(&self) -> impl Stream<Item = Event> {
+        // Wait for RPC request or response, or election timeout
+        let messages = self.data.receiver.clone().map(Event::FramedMessage);
+        let timeouts = self
+            .data
+            .election_timeout
+            .clone()
+            .map(Event::ElectionTimeout);
+        let events = timeouts.merge(messages);
+        events
+    }
+
+    async fn send_message(&self, message: Message, target: Target) {
+        info!("{:?}: >>> [{:?}] {:?}", self.data.id, Target::All, message);
+
+        self.data
+            .sender
+            .send(FramedMessage {
+                source: self.data.id,
+                target,
+                message: Arc::new(message),
+            })
+            .await;
     }
 }
 
@@ -219,16 +266,7 @@ impl State<Candidate> {
             self.data.id,
         ));
 
-        info!("{:?}: >>> [{:?}] {:?}", self.data.id, Target::All, message);
-
-        self.data
-            .sender
-            .send(FramedMessage {
-                source: self.data.id,
-                target: Target::All,
-                message: Arc::new(message),
-            })
-            .await;
+        self.send_message(message, Target::All).await;
 
         self
     }
