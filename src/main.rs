@@ -21,6 +21,9 @@ async fn async_main() -> Result<()> {
 }
 
 fn main() -> Result<()> {
-    env_logger::init_from_env(Env::default().default_filter_or("info"));
+    env_logger::Builder::from_env(Env::default().default_filter_or("heartbeatd=info"))
+        .format_timestamp_millis()
+        .init();
+
     task::block_on(async_main())
 }

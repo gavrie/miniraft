@@ -6,10 +6,11 @@ use std::sync::Arc;
 use super::rpc::Message;
 use super::server::Server;
 use super::state::*;
+use crate::miniraft::rpc::{FramedMessage, Target};
 
 pub struct Cluster {
     servers: HashMap<ServerId, Server>,
-    rx: Receiver<(ServerId, Arc<Message>)>,
+    rx: Receiver<FramedMessage>,
 }
 
 impl Cluster {
@@ -29,14 +30,35 @@ impl Cluster {
 
     pub async fn run(&self) -> Result<()> {
         loop {
-            let (sender_id, message) = self.rx.recv().await?;
-            info!("<<< {:?}: {:?}", sender_id, message);
+            let frame = self.rx.recv().await?;
+            // info!(
+            //     "<<< {:?}->{:?}: {:?}",
+            //     frame.source, frame.target, frame.message
+            // );
 
-            // Broadcast the message to all servers
-            for (_id, server) in self.servers.iter() {
-                // FIXME: Don't send to originating server?
-                let message = Arc::clone(&message);
-                server.server_tx.send(message).await;
+            match frame.target {
+                Target::Server(server_id) => {
+                    let server = self.servers.get(&server_id).unwrap();
+                    server.server_tx.send(frame).await;
+                }
+
+                Target::All => {
+                    // Broadcast the message to all servers
+                    for (server_id, server) in self.servers.iter() {
+                        if server_id == &frame.source {
+                            continue;
+                        }
+
+                        server
+                            .server_tx
+                            .send(FramedMessage {
+                                source: frame.source,
+                                target: Target::All,
+                                message: frame.message.clone(),
+                            })
+                            .await;
+                    }
+                }
             }
         }
     }

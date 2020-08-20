@@ -1,4 +1,5 @@
 use super::state::*;
+use std::sync::Arc;
 
 // RPC
 
@@ -9,6 +10,18 @@ pub enum Message {
     RequestVoteResponse(RequestVoteResults),
     AppendEntriesRequest(AppendEntriesArguments),
     AppendEntriesResponse(AppendEntriesResults),
+}
+
+#[derive(Debug)]
+pub enum Target {
+    All,
+    Server(ServerId),
+}
+
+pub struct FramedMessage {
+    pub source: ServerId,
+    pub target: Target,
+    pub message: Arc<Message>,
 }
 
 #[derive(Debug)]

@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use super::rpc::Message;
 use super::state::*;
-use crate::miniraft::rpc::RequestVoteArguments;
+use crate::miniraft::rpc::{FramedMessage, RequestVoteArguments, Target};
 
 //////////////////////////////////
 
@@ -62,12 +62,12 @@ struct VolatileDataForLeader {
 //////////////////////////////////
 
 pub struct Server {
-    pub server_tx: Sender<Arc<Message>>,
+    pub server_tx: Sender<FramedMessage>,
     handle: JoinHandle<()>,
 }
 
 impl Server {
-    pub fn new(id: ServerId, cluster_tx: Sender<(ServerId, Arc<Message>)>) -> Self {
+    pub fn new(id: ServerId, cluster_tx: Sender<FramedMessage>) -> Self {
         let (server_tx, server_rx) = sync::channel(1);
 
         info!("{:?}: Started server", id);
@@ -92,9 +92,39 @@ enum ServerState {
 impl ServerState {
     async fn next(self) -> Self {
         use ServerState::*;
+
         match self {
-            Follower(state) => Candidate(state.run().await),
-            server_state => server_state,
+            Follower(state) => {
+                // Wait for RPC request or response, or election timeout
+                let message =
+                    future::timeout(state.data.election_timeout, state.data.receiver.recv()).await;
+
+                match message {
+                    Ok(Ok(message)) => {
+                        info!("{:?}: <<< {:?}", state.data.id, message.message);
+                    }
+                    Ok(Err(e)) => panic!("{}", e),
+                    Err(_) => {
+                        info!(
+                            "{:?}: Election timed out after {:?}",
+                            state.data.id, state.data.election_timeout
+                        );
+                        return Candidate(state.become_candidate().await);
+                    }
+                }
+
+                Follower(state)
+            }
+
+            Candidate(state) => {
+                task::sleep(Duration::from_secs(3600)).await;
+                Candidate(state)
+            }
+
+            Leader(state) => {
+                task::sleep(Duration::from_secs(3600)).await;
+                Leader(state)
+            }
         }
     }
 }
@@ -111,8 +141,8 @@ struct ServerData {
     persistent: PersistentData,
     volatile: VolatileData,
     election_timeout: Duration,
-    sender: Sender<(ServerId, Arc<Message>)>,
-    receiver: Receiver<Arc<Message>>,
+    sender: Sender<FramedMessage>,
+    receiver: Receiver<FramedMessage>,
 }
 
 impl<S: IsServerState> State<S> {
@@ -125,8 +155,8 @@ impl<S: IsServerState> State<S> {
 impl State<Follower> {
     pub fn new(
         id: ServerId,
-        cluster_tx: Sender<(ServerId, Arc<Message>)>,
-        receiver: Receiver<Arc<Message>>,
+        cluster_tx: Sender<FramedMessage>,
+        receiver: Receiver<FramedMessage>,
     ) -> Self {
         let mut state = Self {
             state: Follower,
@@ -145,45 +175,22 @@ impl State<Follower> {
         state
     }
 
-    async fn run(self) -> State<Candidate> {
-        // Wait for RPC request or response, or election timeout
-
-        let message = future::timeout(self.data.election_timeout, self.data.receiver.recv()).await;
-
-        match message {
-            Ok(Ok(message)) => {
-                info!("{:?}: <<< {:?}", self.data.id, message);
-            }
-            Ok(Err(e)) => panic!("{}", e),
-            Err(_) => {
-                info!(
-                    "{:?}: Election timed out after {:?}",
-                    self.data.id, self.data.election_timeout
-                );
-            }
-        }
-
-        self.become_candidate()
-    }
-
-    fn become_candidate(self) -> State<Candidate> {
+    async fn become_candidate(self) -> State<Candidate> {
         info!("{:?}: Becoming candidate", self.data.id);
 
-        // TODO: Transition Server<Follower> to Server<Candidate>.
-        // Transition by calling a method instead of by setting state explicitly.
-        // This will allow us to ensure the transition is a valid one.
-        State {
+        let state = State {
             state: Candidate,
             data: self.data,
-        }
+        };
+
+        state.start_election().await
     }
 }
 
 impl State<Candidate> {
-    fn run(&mut self) {}
+    async fn start_election(mut self) -> Self {
+        info!("{:?}: Starting election", self.data.id);
 
-    async fn start_election(&mut self) -> Result<()> {
-        // Starting election:
         self.data.persistent.current_term += 1;
 
         // TODO: Vote for self
@@ -197,17 +204,22 @@ impl State<Candidate> {
             self.data.id,
         ));
 
-        let message = Arc::new(message);
-        info!("{:?}: >>> {:?}", self.data.id, message);
-        self.data.sender.send((self.data.id, message)).await;
+        info!("{:?}: >>> [{:?}] {:?}", self.data.id, Target::All, message);
 
-        Ok(())
+        self.data
+            .sender
+            .send(FramedMessage {
+                source: self.data.id,
+                target: Target::All,
+                message: Arc::new(message),
+            })
+            .await;
+
+        self
     }
 }
 
-impl State<Leader> {
-    fn run(&mut self) {}
-}
+impl State<Leader> {}
 
 impl PersistentData {
     fn new() -> Self {
