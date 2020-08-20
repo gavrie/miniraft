@@ -1,11 +1,11 @@
-use async_std::future;
+use async_std::prelude::*;
 use async_std::sync::{self, Receiver, Sender};
 use async_std::task;
 use async_std::task::JoinHandle;
 use log::info;
 use rand::prelude::*;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::rpc::Message;
 use super::state::*;
@@ -89,6 +89,11 @@ enum ServerState {
     Leader(State<Leader>),
 }
 
+enum Event {
+    Timeout(Duration),
+    FramedMessage(FramedMessage),
+}
+
 impl ServerState {
     async fn next(self) -> Self {
         use ServerState::*;
@@ -96,24 +101,26 @@ impl ServerState {
         match self {
             Follower(state) => {
                 // Wait for RPC request or response, or election timeout
-                let message =
-                    future::timeout(state.data.election_timeout, state.data.receiver.recv()).await;
+                let messages = state.data.receiver.clone().map(Event::FramedMessage);
+                let timeouts = state.data.election_timeout.clone().map(Event::Timeout);
+                let mut events = timeouts.merge(messages);
 
-                match message {
-                    Ok(Ok(message)) => {
-                        info!("{:?}: <<< {:?}", state.data.id, message.message);
-                    }
-                    Ok(Err(e)) => panic!("{}", e),
-                    Err(_) => {
-                        info!(
-                            "{:?}: Election timed out after {:?}",
-                            state.data.id, state.data.election_timeout
-                        );
-                        return Candidate(state.become_candidate().await);
+                while let Some(event) = events.next().await {
+                    match event {
+                        Event::FramedMessage(frame) => {
+                            info!("{:?}: <<< {:?}", state.data.id, frame.message);
+                        }
+                        Event::Timeout(duration) => {
+                            info!(
+                                "{:?}: Election timed out after {:?}",
+                                state.data.id, duration,
+                            );
+                            return Candidate(state.become_candidate().await);
+                        }
                     }
                 }
 
-                Follower(state)
+                panic!("should not get here");
             }
 
             Candidate(state) => {
@@ -140,15 +147,23 @@ struct ServerData {
     id: ServerId,
     persistent: PersistentData,
     volatile: VolatileData,
-    election_timeout: Duration,
+    election_timeout: Receiver<Duration>,
     sender: Sender<FramedMessage>,
     receiver: Receiver<FramedMessage>,
 }
 
 impl<S: IsServerState> State<S> {
-    fn reset_election_timeout(&mut self) {
-        let election_timeout = thread_rng().gen_range(150, 300);
-        self.data.election_timeout = Duration::from_millis(election_timeout);
+    fn set_election_timeout(&mut self) {
+        let timeout = Duration::from_millis(thread_rng().gen_range(150, 300));
+
+        let (tx, rx) = sync::channel(1);
+        self.data.election_timeout = rx;
+        let start = Instant::now();
+
+        task::spawn(async move {
+            task::sleep(timeout).await;
+            tx.send(start.elapsed()).await;
+        });
     }
 }
 
@@ -164,13 +179,13 @@ impl State<Follower> {
                 id,
                 persistent: PersistentData::new(),
                 volatile: VolatileData::new(),
-                election_timeout: Default::default(),
+                election_timeout: sync::channel(1).1,
                 sender: cluster_tx,
                 receiver,
             },
         };
 
-        state.reset_election_timeout();
+        state.set_election_timeout();
 
         state
     }
@@ -195,7 +210,7 @@ impl State<Candidate> {
 
         // TODO: Vote for self
 
-        self.reset_election_timeout();
+        self.set_election_timeout();
 
         // TODO: Send RequestVote RPCs to all other servers
 

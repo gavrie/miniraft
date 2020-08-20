@@ -1,9 +1,6 @@
 use async_std::sync::{self, Receiver};
-use log::info;
 use std::collections::HashMap;
-use std::sync::Arc;
 
-use super::rpc::Message;
 use super::server::Server;
 use super::state::*;
 use crate::miniraft::rpc::{FramedMessage, Target};
