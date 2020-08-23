@@ -86,5 +86,5 @@ pub struct AppendEntriesResults {
     pub term: Term,
 
     // True if follower contained entry matching prev_log_index and prev_log_term
-    success: bool,
+    pub success: bool,
 }

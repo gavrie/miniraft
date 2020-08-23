@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 use super::rpc::Message;
 use super::state::*;
 use crate::miniraft::rpc::{
-    AppendEntriesArguments, FramedMessage, RequestVoteArguments, RequestVoteResults, Target,
+    AppendEntriesArguments, AppendEntriesResults, FramedMessage, RequestVoteArguments,
+    RequestVoteResults, Target,
 };
 
 //////////////////////////////////
@@ -146,11 +147,21 @@ impl ServerState {
                             }
                         }
 
-                        AppendEntriesRequest(_args) => {
+                        AppendEntriesRequest(args) => {
                             // Reset election timeout
                             received_heartbeat = true;
                             state.state.election_timeout =
                                 state.state.election_timeout.reset_election_timeout().await;
+
+                            // Respond to leader
+                            let response = AppendEntriesResponse(AppendEntriesResults {
+                                term: state.data.persistent.current_term,
+                                success: true, // TODO
+                            });
+
+                            state
+                                .send_message(Arc::new(response), Target::Server(frame.source))
+                                .await;
                         }
 
                         RequestVoteResponse(_results) => {}
