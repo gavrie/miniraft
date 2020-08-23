@@ -1,3 +1,4 @@
+use async_std::future;
 use async_std::prelude::*;
 use async_std::sync::{self, Receiver, Sender};
 use async_std::task;
@@ -17,11 +18,11 @@ use crate::miniraft::rpc::{
 //////////////////////////////////
 
 struct Follower {
-    election_timeout: Receiver<Duration>,
+    election_timeout: ElectionTimeout,
 }
 
 struct Candidate {
-    election_timeout: Receiver<Duration>,
+    election_timeout: ElectionTimeout,
 }
 
 struct Leader {
@@ -146,7 +147,7 @@ impl ServerState {
                         AppendEntriesRequest(_args) => {
                             received_heartbeat = true;
                             state.state.election_timeout =
-                                <State<Follower>>::reset_election_timeout(state.data.id);
+                                state.state.election_timeout.reset_election_timeout().await;
                         }
                         AppendEntriesResponse(_results) => {}
                     }
@@ -285,22 +286,6 @@ struct ServerData {
 }
 
 impl<S: IsServerState> State<S> {
-    fn reset_election_timeout(server_id: ServerId) -> Receiver<Duration> {
-        let timeout = Duration::from_millis(thread_rng().gen_range(150, 300));
-
-        let (tx, rx) = sync::channel(1);
-        let start = Instant::now();
-
-        debug!("{:?}: Set election timeout to {:?}", server_id, timeout);
-
-        task::spawn(async move {
-            task::sleep(timeout).await;
-            tx.send(start.elapsed()).await;
-        });
-
-        rx
-    }
-
     async fn send_message(&self, message: Arc<Message>, target: Target) {
         info!("{:?}: >>> [{:?}] {:?}", self.data.id, target, message);
 
@@ -367,14 +352,12 @@ impl<S: IsServerState> State<S> {
     fn become_follower(self) -> State<Follower> {
         info!("{:?}: Becoming follower", self.data.id);
 
-        let mut state = State {
+        State {
             state: Follower {
-                election_timeout: <State<Follower>>::reset_election_timeout(self.data.id),
+                election_timeout: ElectionTimeout::new(self.data.id),
             },
             data: self.data,
-        };
-
-        state
+        }
     }
 }
 
@@ -384,9 +367,9 @@ impl State<Follower> {
         sender: Sender<FramedMessage>,
         receiver: Receiver<FramedMessage>,
     ) -> Self {
-        let mut state = Self {
+        Self {
             state: Follower {
-                election_timeout: Self::reset_election_timeout(id),
+                election_timeout: ElectionTimeout::new(id),
             },
             data: ServerData {
                 id,
@@ -395,9 +378,7 @@ impl State<Follower> {
                 sender,
                 receiver,
             },
-        };
-
-        state
+        }
     }
 
     // TODO: Use a generic impl common to both Follower and Candidate
@@ -408,6 +389,7 @@ impl State<Follower> {
         let election_timeout = self
             .state
             .election_timeout
+            .receiver
             .clone()
             .map(FollowerEvent::ElectionTimeout);
 
@@ -418,9 +400,9 @@ impl State<Follower> {
     async fn become_candidate(self) -> State<Candidate> {
         info!("{:?}: Becoming candidate", self.data.id);
 
-        let state = State {
+        let mut state = State {
             state: Candidate {
-                election_timeout: Self::reset_election_timeout(self.data.id),
+                election_timeout: ElectionTimeout::new(self.data.id),
             },
             data: self.data,
         };
@@ -452,6 +434,7 @@ impl State<Candidate> {
         let election_timeout = self
             .state
             .election_timeout
+            .receiver
             .clone()
             .map(FollowerEvent::ElectionTimeout);
 
@@ -525,6 +508,53 @@ impl State<Leader> {
         });
 
         self.send_message(Arc::new(message), Target::All).await;
+    }
+}
+
+struct ElectionTimeout {
+    server_id: ServerId,
+    receiver: Receiver<Duration>,
+    handle: JoinHandle<()>,
+}
+
+impl ElectionTimeout {
+    fn new(server_id: ServerId) -> Self {
+        let (receiver, handle) = Self::set_election_timeout(server_id);
+
+        Self {
+            server_id,
+            receiver,
+            handle,
+        }
+    }
+
+    async fn reset_election_timeout(mut self) -> Self {
+        // Cancel previous timeout first
+        self.handle.cancel().await;
+        let server_id = self.server_id;
+
+        let (rx, handle) = Self::set_election_timeout(server_id);
+
+        self.receiver = rx;
+        self.handle = handle;
+
+        self
+    }
+
+    fn set_election_timeout(server_id: ServerId) -> (Receiver<Duration>, JoinHandle<()>) {
+        let timeout = Duration::from_millis(thread_rng().gen_range(150, 300));
+
+        let (tx, rx) = sync::channel(1);
+        let start = Instant::now();
+
+        debug!("{:?}: Set election timeout to {:?}", server_id, timeout);
+
+        let handle = task::spawn(async move {
+            task::sleep(timeout).await;
+            tx.send(start.elapsed()).await;
+        });
+
+        (rx, handle)
     }
 }
 
