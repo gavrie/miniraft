@@ -62,28 +62,28 @@ pub struct RequestVoteResults {
 #[derive(Debug)]
 pub struct AppendEntriesArguments {
     // Leader's term
-    term: Term,
+    pub term: Term,
 
     // So follower can redirect clients
-    leader_id: ServerId,
+    pub leader_id: ServerId,
 
     // Index of log entry immediately preceding new ones
-    prev_log_index: LogIndex,
+    pub prev_log_index: LogIndex,
 
     // Term of prev_log_index entry
-    prev_log_term: Term,
+    pub prev_log_term: Term,
 
     // Log entries to store (empty for heartbeat; may send more than one for efficiency)
-    entries: Vec<LogEntry>,
+    pub entries: Vec<LogEntry>,
 
     // Leader's commit_index
-    leader_commit: LogIndex,
+    pub leader_commit: LogIndex,
 }
 
 #[derive(Debug)]
 pub struct AppendEntriesResults {
     // current_term, for leader to update itself
-    term: Term,
+    pub term: Term,
 
     // True if follower contained entry matching prev_log_index and prev_log_term
     success: bool,

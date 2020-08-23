@@ -10,13 +10,24 @@ use std::time::{Duration, Instant};
 
 use super::rpc::Message;
 use super::state::*;
-use crate::miniraft::rpc::{FramedMessage, RequestVoteArguments, RequestVoteResults, Target};
+use crate::miniraft::rpc::{
+    AppendEntriesArguments, FramedMessage, RequestVoteArguments, RequestVoteResults, Target,
+};
 
 //////////////////////////////////
 
-struct Follower;
-struct Candidate;
-struct Leader(VolatileDataForLeader);
+struct Follower {
+    election_timeout: Receiver<Duration>,
+}
+
+struct Candidate {
+    election_timeout: Receiver<Duration>,
+}
+
+struct Leader {
+    heartbeat_interval: Receiver<()>,
+    volatile: VolatileDataForLeader,
+}
 
 pub trait IsServerState {}
 impl IsServerState for Follower {}
@@ -90,8 +101,13 @@ enum ServerState {
     Leader(State<Leader>),
 }
 
-enum Event {
+enum FollowerEvent {
     ElectionTimeout(Duration),
+    FramedMessage(FramedMessage),
+}
+
+enum LeaderEvent {
+    Heartbeat(()),
     FramedMessage(FramedMessage),
 }
 
@@ -107,38 +123,60 @@ impl ServerState {
     }
 
     async fn handle_follower(mut state: State<Follower>) -> Self {
-        use ServerState::*;
+        let mut has_voted = false;
+        let mut received_heartbeat = false;
 
         let mut events = state.events();
+
         while let Some(event) = events.next().await {
             match event {
-                Event::FramedMessage(frame) => {
+                FollowerEvent::FramedMessage(frame) => {
                     debug!("{:?}: <<< {:?}", state.data.id, frame.message);
                     use Message::*;
 
-                    match frame.message.as_ref() {
+                    let message = frame.message.as_ref();
+                    state.update_term_if_outdated(message);
+
+                    match message {
                         RequestVoteRequest(args) => {
+                            has_voted = true;
                             state.vote(args).await;
-                            state.reset_election_timeout();
                         }
                         RequestVoteResponse(_results) => {}
-                        AppendEntriesRequest(_args) => {}
+                        AppendEntriesRequest(_args) => {
+                            received_heartbeat = true;
+                            state.state.election_timeout =
+                                <State<Follower>>::reset_election_timeout(state.data.id);
+                        }
                         AppendEntriesResponse(_results) => {}
                     }
                 }
-                Event::ElectionTimeout(duration) => {
-                    info!(
-                        "{:?}: Election timed out after {:?}, converting to candidate",
-                        state.data.id, duration,
-                    );
-                    return Candidate(state.become_candidate().await);
+                FollowerEvent::ElectionTimeout(duration) => {
+                    if has_voted {
+                        info!(
+                            "{:?}: Election timed out after {:?}, but voted for other candidate",
+                            state.data.id, duration,
+                        );
+                    } else if received_heartbeat {
+                        info!(
+                            "{:?}: Election timed out after {:?}, but received heartbeat",
+                            state.data.id, duration,
+                        );
+                        continue;
+                    } else {
+                        info!(
+                            "{:?}: Election timed out after {:?}, converting to candidate",
+                            state.data.id, duration,
+                        );
+                        return ServerState::Candidate(state.become_candidate().await);
+                    }
                 }
             }
         }
         panic!("should not get here");
     }
 
-    async fn handle_candidate(state: State<Candidate>) -> Self {
+    async fn handle_candidate(mut state: State<Candidate>) -> Self {
         use ServerState::*;
 
         let num_servers = 3; // FIXME: Don't hardcode but get from Cluster
@@ -147,11 +185,19 @@ impl ServerState {
 
         while let Some(event) = events.next().await {
             match event {
-                Event::FramedMessage(frame) => {
+                FollowerEvent::FramedMessage(frame) => {
                     debug!("{:?}: <<< {:?}", state.data.id, frame.message);
                     use Message::*;
 
-                    match frame.message.as_ref() {
+                    let message = frame.message.as_ref();
+                    if state.update_term_if_outdated(message) {
+                        state
+                            .send_message(frame.message, Target::Server(state.data.id))
+                            .await;
+                        return Follower(state.become_follower());
+                    }
+
+                    match message {
                         RequestVoteRequest(args) => {
                             state.vote(args).await;
                         }
@@ -174,7 +220,7 @@ impl ServerState {
                         AppendEntriesResponse(_results) => {}
                     }
                 }
-                Event::ElectionTimeout(duration) => {
+                FollowerEvent::ElectionTimeout(duration) => {
                     debug!(
                         "{:?}: Election timed out after {:?}, starting new election",
                         state.data.id, duration,
@@ -187,17 +233,25 @@ impl ServerState {
         panic!("should not get here");
     }
 
-    async fn handle_leader(state: State<Leader>) -> Self {
+    async fn handle_leader(mut state: State<Leader>) -> Self {
         use ServerState::*;
 
         let mut events = state.events();
         while let Some(event) = events.next().await {
             match event {
-                Event::FramedMessage(frame) => {
+                LeaderEvent::FramedMessage(frame) => {
                     debug!("{:?}: <<< {:?}", state.data.id, frame.message);
                     use Message::*;
 
-                    match frame.message.as_ref() {
+                    let message = frame.message.as_ref();
+                    if state.update_term_if_outdated(message) {
+                        state
+                            .send_message(frame.message, Target::Server(state.data.id))
+                            .await;
+                        return Follower(state.become_follower());
+                    }
+
+                    match message {
                         RequestVoteRequest(args) => {
                             state.vote(args).await;
                         }
@@ -206,8 +260,8 @@ impl ServerState {
                         AppendEntriesResponse(_results) => {}
                     }
                 }
-                Event::ElectionTimeout(_) => {
-                    panic!("Election timeout in leader -- should not happen!")
+                LeaderEvent::Heartbeat(_) => {
+                    state.send_heartbeat().await;
                 }
             }
         }
@@ -226,42 +280,28 @@ struct ServerData {
     id: ServerId,
     persistent: PersistentData,
     volatile: VolatileData,
-    election_timeout: Receiver<Duration>,
     sender: Sender<FramedMessage>,
     receiver: Receiver<FramedMessage>,
 }
 
 impl<S: IsServerState> State<S> {
-    fn reset_election_timeout(&mut self) {
+    fn reset_election_timeout(server_id: ServerId) -> Receiver<Duration> {
         let timeout = Duration::from_millis(thread_rng().gen_range(150, 300));
 
         let (tx, rx) = sync::channel(1);
-        self.data.election_timeout = rx;
         let start = Instant::now();
 
-        debug!("{:?}: Set election timeout to {:?}", self.data.id, timeout);
+        debug!("{:?}: Set election timeout to {:?}", server_id, timeout);
 
         task::spawn(async move {
             task::sleep(timeout).await;
             tx.send(start.elapsed()).await;
         });
+
+        rx
     }
 
-    fn events(&self) -> impl Stream<Item = Event> {
-        // Wait for RPC request or response, or election timeout
-        let messages = self.data.receiver.clone().map(Event::FramedMessage);
-
-        let timeouts = self
-            .data
-            .election_timeout
-            .clone()
-            .map(Event::ElectionTimeout);
-
-        let events = timeouts.merge(messages);
-        events
-    }
-
-    async fn send_message(&self, message: Message, target: Target) {
+    async fn send_message(&self, message: Arc<Message>, target: Target) {
         info!("{:?}: >>> [{:?}] {:?}", self.data.id, target, message);
 
         self.data
@@ -269,7 +309,7 @@ impl<S: IsServerState> State<S> {
             .send(FramedMessage {
                 source: self.data.id,
                 target,
-                message: Arc::new(message),
+                message,
             })
             .await;
     }
@@ -298,7 +338,43 @@ impl<S: IsServerState> State<S> {
             vote_granted,
         });
 
-        self.send_message(message, Target::Server(server_id)).await;
+        self.send_message(Arc::new(message), Target::Server(server_id))
+            .await;
+    }
+
+    fn update_term_if_outdated(&mut self, message: &Message) -> bool {
+        let term = match message {
+            Message::RequestVoteRequest(args) => args.term,
+            Message::RequestVoteResponse(results) => results.term,
+            Message::AppendEntriesRequest(args) => args.term,
+            Message::AppendEntriesResponse(results) => results.term,
+        };
+
+        let current_term = self.data.persistent.current_term;
+
+        if term > current_term {
+            info!(
+                "{:?}: Found newer term ({}) than our current one ({})",
+                self.data.id, term.0, current_term.0
+            );
+            self.data.persistent.current_term = term;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn become_follower(self) -> State<Follower> {
+        info!("{:?}: Becoming follower", self.data.id);
+
+        let mut state = State {
+            state: Follower {
+                election_timeout: <State<Follower>>::reset_election_timeout(self.data.id),
+            },
+            data: self.data,
+        };
+
+        state
     }
 }
 
@@ -309,27 +385,43 @@ impl State<Follower> {
         receiver: Receiver<FramedMessage>,
     ) -> Self {
         let mut state = Self {
-            state: Follower,
+            state: Follower {
+                election_timeout: Self::reset_election_timeout(id),
+            },
             data: ServerData {
                 id,
                 persistent: PersistentData::new(),
                 volatile: VolatileData::new(),
-                election_timeout: sync::channel(1).1,
                 sender,
                 receiver,
             },
         };
 
-        state.reset_election_timeout();
-
         state
+    }
+
+    // TODO: Use a generic impl common to both Follower and Candidate
+    fn events(&self) -> impl Stream<Item = FollowerEvent> {
+        // Wait for RPC request or response, or election timeout
+        let messages = self.data.receiver.clone().map(FollowerEvent::FramedMessage);
+
+        let election_timeout = self
+            .state
+            .election_timeout
+            .clone()
+            .map(FollowerEvent::ElectionTimeout);
+
+        let events = election_timeout.merge(messages);
+        events
     }
 
     async fn become_candidate(self) -> State<Candidate> {
         info!("{:?}: Becoming candidate", self.data.id);
 
         let state = State {
-            state: Candidate,
+            state: Candidate {
+                election_timeout: Self::reset_election_timeout(self.data.id),
+            },
             data: self.data,
         };
 
@@ -343,32 +435,42 @@ impl State<Candidate> {
 
         self.data.persistent.current_term += 1;
 
-        // TODO: Vote for self
-
-        self.reset_election_timeout();
-
-        // TODO: Send RequestVote RPCs to all other servers
-
         let message = Message::RequestVoteRequest(RequestVoteArguments::new(
             self.data.persistent.current_term,
             self.data.id,
         ));
 
-        self.send_message(message, Target::All).await;
+        self.send_message(Arc::new(message), Target::All).await;
 
         self
+    }
+
+    fn events(&self) -> impl Stream<Item = FollowerEvent> {
+        // Wait for RPC request or response, or election timeout
+        let messages = self.data.receiver.clone().map(FollowerEvent::FramedMessage);
+
+        let election_timeout = self
+            .state
+            .election_timeout
+            .clone()
+            .map(FollowerEvent::ElectionTimeout);
+
+        let events = election_timeout.merge(messages);
+        events
     }
 
     fn become_leader(self) -> State<Leader> {
         info!("{:?}: Becoming leader", self.data.id);
 
         let state = State {
-            state: Leader(VolatileDataForLeader::new()),
+            state: Leader {
+                volatile: VolatileDataForLeader::new(),
+                heartbeat_interval: State::start_heartbeat(self.data.id),
+            },
             data: ServerData {
                 id: self.data.id,
                 persistent: self.data.persistent,
                 volatile: self.data.volatile,
-                election_timeout: sync::channel(1).1, // Inert channel
                 sender: self.data.sender,
                 receiver: self.data.receiver,
             },
@@ -378,7 +480,53 @@ impl State<Candidate> {
     }
 }
 
-impl State<Leader> {}
+impl State<Leader> {
+    fn start_heartbeat(server_id: ServerId) -> Receiver<()> {
+        let interval = Duration::from_millis(50);
+
+        let (tx, rx) = sync::channel(1);
+
+        debug!("{:?}: Set heartbeat interval to {:?}", server_id, interval);
+
+        task::spawn(async move {
+            loop {
+                tx.send(()).await;
+                task::sleep(interval).await;
+            }
+        });
+
+        rx
+    }
+
+    fn events(&self) -> impl Stream<Item = LeaderEvent> {
+        // Wait for RPC request or response, or election timeout
+        let messages = self.data.receiver.clone().map(LeaderEvent::FramedMessage);
+
+        let timeouts = self
+            .state
+            .heartbeat_interval
+            .clone()
+            .map(LeaderEvent::Heartbeat);
+
+        let events = timeouts.merge(messages);
+        events
+    }
+
+    async fn send_heartbeat(&self) {
+        info!("{:?}: Sending heartbeat", self.data.id);
+
+        let message = Message::AppendEntriesRequest(AppendEntriesArguments {
+            term: self.data.persistent.current_term,
+            leader_id: self.data.id,
+            prev_log_index: LogIndex(0), // TODO
+            prev_log_term: Term(0),      // TODO
+            entries: vec![],
+            leader_commit: LogIndex(0), // TODO
+        });
+
+        self.send_message(Arc::new(message), Target::All).await;
+    }
+}
 
 impl PersistentData {
     fn new() -> Self {
