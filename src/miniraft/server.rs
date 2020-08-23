@@ -100,113 +100,118 @@ impl ServerState {
         use ServerState::*;
 
         match self {
-            Follower(state) => {
-                let mut events = state.events();
-                while let Some(event) = events.next().await {
-                    match event {
-                        Event::FramedMessage(frame) => {
-                            debug!("{:?}: <<< {:?}", state.data.id, frame.message);
-                            use Message::*;
+            Follower(state) => Self::handle_follower(state).await,
+            Candidate(state) => Self::handle_candidate(state).await,
+            Leader(state) => Self::handle_leader(state).await,
+        }
+    }
 
-                            match frame.message.as_ref() {
-                                RequestVoteRequest(args) => {
-                                    state.vote(args).await;
-                                }
-                                RequestVoteResponse(_results) => {}
-                                AppendEntriesRequest(_args) => {}
-                                AppendEntriesResponse(_results) => {}
-                            }
+    async fn handle_follower(mut state: State<Follower>) -> Self {
+        use ServerState::*;
+
+        let mut events = state.events();
+        while let Some(event) = events.next().await {
+            match event {
+                Event::FramedMessage(frame) => {
+                    debug!("{:?}: <<< {:?}", state.data.id, frame.message);
+                    use Message::*;
+
+                    match frame.message.as_ref() {
+                        RequestVoteRequest(args) => {
+                            state.vote(args).await;
+                            state.reset_election_timeout();
                         }
-                        Event::ElectionTimeout(duration) => {
-                            info!(
-                                "{:?}: Election timed out after {:?}, converting to candidate",
-                                state.data.id, duration,
-                            );
-                            return Candidate(state.become_candidate().await);
-                        }
+                        RequestVoteResponse(_results) => {}
+                        AppendEntriesRequest(_args) => {}
+                        AppendEntriesResponse(_results) => {}
                     }
                 }
-                panic!("should not get here");
-            }
-
-            Candidate(state) => {
-                let num_servers = 3; // FIXME: Don't hardcode but get from Cluster
-                let mut num_votes = 0;
-                let mut events = state.events();
-
-                while let Some(event) = events.next().await {
-                    match event {
-                        Event::FramedMessage(frame) => {
-                            debug!("{:?}: <<< {:?}", state.data.id, frame.message);
-                            use Message::*;
-
-                            match frame.message.as_ref() {
-                                RequestVoteRequest(args) => {
-                                    state.vote(args).await;
-                                }
-                                RequestVoteResponse(results) => {
-                                    if results.vote_granted {
-                                        info!(
-                                            "{:?}: Received vote from {:?}",
-                                            state.data.id, frame.source
-                                        );
-                                        num_votes += 1;
-
-                                        // Do we have a majority vote?
-                                        if num_votes >= num_servers / 2 + 1 {
-                                            info!(
-                                                "{:?}: Got {}/{} votes",
-                                                state.data.id, num_votes, num_servers
-                                            );
-                                            return Leader(state.become_leader());
-                                        }
-                                    }
-                                }
-                                AppendEntriesRequest(_args) => {}
-                                AppendEntriesResponse(_results) => {}
-                            }
-                        }
-                        Event::ElectionTimeout(duration) => {
-                            debug!(
-                                "{:?}: Election timed out after {:?}, starting new election",
-                                state.data.id, duration,
-                            );
-                            return Candidate(state.start_election().await);
-                        }
-                    }
+                Event::ElectionTimeout(duration) => {
+                    info!(
+                        "{:?}: Election timed out after {:?}, converting to candidate",
+                        state.data.id, duration,
+                    );
+                    return Candidate(state.become_candidate().await);
                 }
-
-                panic!("should not get here");
-            }
-
-            Leader(state) => {
-                let mut events = state.events();
-                while let Some(event) = events.next().await {
-                    match event {
-                        Event::FramedMessage(frame) => {
-                            debug!("{:?}: <<< {:?}", state.data.id, frame.message);
-                            use Message::*;
-
-                            match frame.message.as_ref() {
-                                RequestVoteRequest(args) => {
-                                    state.vote(args).await;
-                                }
-                                RequestVoteResponse(_results) => {}
-                                AppendEntriesRequest(_args) => {}
-                                AppendEntriesResponse(_results) => {}
-                            }
-                        }
-                        Event::ElectionTimeout(duration) => {
-                            debug!(
-                                "{:?}: Election timed out after {:?}",
-                                state.data.id, duration,
-                            );
-                        }
-                    }
-                }
-                panic!("should not get here");
             }
         }
+        panic!("should not get here");
+    }
+
+    async fn handle_candidate(state: State<Candidate>) -> Self {
+        use ServerState::*;
+
+        let num_servers = 3; // FIXME: Don't hardcode but get from Cluster
+        let mut num_votes = 1; // Vote for self
+        let mut events = state.events();
+
+        while let Some(event) = events.next().await {
+            match event {
+                Event::FramedMessage(frame) => {
+                    debug!("{:?}: <<< {:?}", state.data.id, frame.message);
+                    use Message::*;
+
+                    match frame.message.as_ref() {
+                        RequestVoteRequest(args) => {
+                            state.vote(args).await;
+                        }
+                        RequestVoteResponse(results) => {
+                            if results.vote_granted {
+                                info!("{:?}: Received vote from {:?}", state.data.id, frame.source);
+                                num_votes += 1;
+
+                                // Do we have a majority vote?
+                                if num_votes >= num_servers / 2 + 1 {
+                                    info!(
+                                        "{:?}: Got {}/{} votes",
+                                        state.data.id, num_votes, num_servers
+                                    );
+                                    return Leader(state.become_leader());
+                                }
+                            }
+                        }
+                        AppendEntriesRequest(_args) => {}
+                        AppendEntriesResponse(_results) => {}
+                    }
+                }
+                Event::ElectionTimeout(duration) => {
+                    debug!(
+                        "{:?}: Election timed out after {:?}, starting new election",
+                        state.data.id, duration,
+                    );
+                    return Candidate(state.start_election().await);
+                }
+            }
+        }
+
+        panic!("should not get here");
+    }
+
+    async fn handle_leader(state: State<Leader>) -> Self {
+        use ServerState::*;
+
+        let mut events = state.events();
+        while let Some(event) = events.next().await {
+            match event {
+                Event::FramedMessage(frame) => {
+                    debug!("{:?}: <<< {:?}", state.data.id, frame.message);
+                    use Message::*;
+
+                    match frame.message.as_ref() {
+                        RequestVoteRequest(args) => {
+                            state.vote(args).await;
+                        }
+                        RequestVoteResponse(_results) => {}
+                        AppendEntriesRequest(_args) => {}
+                        AppendEntriesResponse(_results) => {}
+                    }
+                }
+                Event::ElectionTimeout(_) => {
+                    panic!("Election timeout in leader -- should not happen!")
+                }
+            }
+        }
+        panic!("should not get here");
     }
 }
 
@@ -227,12 +232,14 @@ struct ServerData {
 }
 
 impl<S: IsServerState> State<S> {
-    fn set_election_timeout(&mut self) {
+    fn reset_election_timeout(&mut self) {
         let timeout = Duration::from_millis(thread_rng().gen_range(150, 300));
 
         let (tx, rx) = sync::channel(1);
         self.data.election_timeout = rx;
         let start = Instant::now();
+
+        debug!("{:?}: Set election timeout to {:?}", self.data.id, timeout);
 
         task::spawn(async move {
             task::sleep(timeout).await;
@@ -243,11 +250,13 @@ impl<S: IsServerState> State<S> {
     fn events(&self) -> impl Stream<Item = Event> {
         // Wait for RPC request or response, or election timeout
         let messages = self.data.receiver.clone().map(Event::FramedMessage);
+
         let timeouts = self
             .data
             .election_timeout
             .clone()
             .map(Event::ElectionTimeout);
+
         let events = timeouts.merge(messages);
         events
     }
@@ -311,7 +320,7 @@ impl State<Follower> {
             },
         };
 
-        state.set_election_timeout();
+        state.reset_election_timeout();
 
         state
     }
@@ -336,7 +345,7 @@ impl State<Candidate> {
 
         // TODO: Vote for self
 
-        self.set_election_timeout();
+        self.reset_election_timeout();
 
         // TODO: Send RequestVote RPCs to all other servers
 
@@ -355,7 +364,14 @@ impl State<Candidate> {
 
         let state = State {
             state: Leader(VolatileDataForLeader::new()),
-            data: self.data,
+            data: ServerData {
+                id: self.data.id,
+                persistent: self.data.persistent,
+                volatile: self.data.volatile,
+                election_timeout: sync::channel(1).1, // Inert channel
+                sender: self.data.sender,
+                receiver: self.data.receiver,
+            },
         };
 
         state
