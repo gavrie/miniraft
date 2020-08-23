@@ -140,15 +140,21 @@ impl ServerState {
 
                     match message {
                         RequestVoteRequest(args) => {
-                            has_voted = true;
-                            state.vote(args).await;
+                            if !has_voted {
+                                has_voted = true;
+                                state.vote(args).await;
+                            }
                         }
-                        RequestVoteResponse(_results) => {}
+
                         AppendEntriesRequest(_args) => {
+                            // Reset election timeout
                             received_heartbeat = true;
                             state.state.election_timeout =
                                 state.state.election_timeout.reset_election_timeout().await;
                         }
+
+                        RequestVoteResponse(_results) => {}
+
                         AppendEntriesResponse(_results) => {}
                     }
                 }
