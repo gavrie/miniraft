@@ -122,7 +122,6 @@ impl ServerState {
     }
 
     async fn handle_follower(mut state: State<Follower>) -> Self {
-        let mut has_voted = false;
         let mut received_heartbeat = false;
 
         let mut events = state.events();
@@ -142,12 +141,7 @@ impl ServerState {
 
                     match message.as_ref() {
                         Message::RequestVoteRequest(args) => {
-                            if !has_voted {
-                                has_voted = true;
-                                state.vote(args).await;
-                            } else {
-                                debug!("{:?}: Already voted in this term", state.data.id,);
-                            }
+                            state.vote(args).await;
                         }
 
                         Message::AppendEntriesRequest(_args) => {
@@ -173,24 +167,27 @@ impl ServerState {
                     }
                 }
                 FollowerEvent::ElectionTimeout(duration) => {
-                    if has_voted {
+                    if state.data.persistent.voted_for.is_some() {
                         info!(
                             "{:?}: Election timed out after {:?}, but voted for other candidate",
                             state.data.id, duration,
                         );
-                    } else if received_heartbeat {
+                        continue;
+                    }
+
+                    if received_heartbeat {
                         info!(
                             "{:?}: Election timed out after {:?}, but received heartbeat",
                             state.data.id, duration,
                         );
                         continue;
-                    } else {
-                        info!(
-                            "{:?}: Election timed out after {:?}, converting to candidate",
-                            state.data.id, duration,
-                        );
-                        return ServerState::Candidate(state.become_candidate().await);
                     }
+
+                    info!(
+                        "{:?}: Election timed out after {:?}, converting to candidate",
+                        state.data.id, duration,
+                    );
+                    return ServerState::Candidate(state.become_candidate().await);
                 }
             }
         }
@@ -327,50 +324,6 @@ impl<S: IsServerState> State<S> {
             .await;
     }
 
-    async fn vote(&mut self, args: &RequestVoteArguments) {
-        let vote_granted = {
-            if args.term < self.data.persistent.current_term {
-                info!(
-                    "{:?}: Requested vote with stale term {:?}, refusing",
-                    self.data.id, args.term
-                );
-                false
-            } else {
-                let voted_for = self.data.persistent.voted_for;
-
-                if voted_for == None || voted_for == Some(args.candidate_id) {
-                    // TODO: Check if candidate's log is at least as up-to-date as receiver's log
-                    info!(
-                        "{:?}: Granting vote to {:?}",
-                        self.data.id, args.candidate_id
-                    );
-                    self.data.persistent.voted_for = Some(args.candidate_id);
-                    true
-                } else {
-                    info!(
-                        "{:?}: Already voted for {:?}, not granting",
-                        self.data.id, args.candidate_id
-                    );
-                    false
-                }
-            }
-        };
-
-        let server_id = args.candidate_id;
-        info!(
-            "{:?}: Voting for {:?}: granted={}",
-            self.data.id, server_id, vote_granted
-        );
-
-        let message = Message::RequestVoteResponse(RequestVoteResults {
-            term: self.data.persistent.current_term,
-            vote_granted,
-        });
-
-        self.send_message(Arc::new(message), Target::Server(server_id))
-            .await;
-    }
-
     async fn update_term_if_outdated(&mut self, message: Arc<Message>) -> bool {
         let term = match message.as_ref() {
             Message::RequestVoteRequest(args) => args.term,
@@ -386,7 +339,9 @@ impl<S: IsServerState> State<S> {
                 "{:?}: Found newer term ({}) than our current one ({})",
                 self.data.id, term.0, current_term.0
             );
+
             self.data.persistent.current_term = term;
+            self.data.persistent.voted_for = None;
 
             // Resend the original message so that it's processed after the state transition
             self.send_message(message, Target::Server(self.data.id))
@@ -461,6 +416,50 @@ impl State<Follower> {
 
         state.start_election().await
     }
+
+    async fn vote(&mut self, args: &RequestVoteArguments) {
+        let vote_granted = {
+            if args.term < self.data.persistent.current_term {
+                info!(
+                    "{:?}: Requested vote with stale term {:?}, refusing",
+                    self.data.id, args.term
+                );
+                false
+            } else {
+                let voted_for = self.data.persistent.voted_for;
+
+                if voted_for == None || voted_for == Some(args.candidate_id) {
+                    // TODO: Check if candidate's log is at least as up-to-date as receiver's log
+                    info!(
+                        "{:?}: Granting vote to {:?}",
+                        self.data.id, args.candidate_id
+                    );
+                    self.data.persistent.voted_for = Some(args.candidate_id);
+                    true
+                } else {
+                    info!(
+                        "{:?}: Already voted for {:?}, not granting",
+                        self.data.id, args.candidate_id
+                    );
+                    false
+                }
+            }
+        };
+
+        let server_id = args.candidate_id;
+        info!(
+            "{:?}: Voting for {:?}: granted={}",
+            self.data.id, server_id, vote_granted
+        );
+
+        let message = Message::RequestVoteResponse(RequestVoteResults {
+            term: self.data.persistent.current_term,
+            vote_granted,
+        });
+
+        self.send_message(Arc::new(message), Target::Server(server_id))
+            .await;
+    }
 }
 
 impl State<Candidate> {
@@ -468,6 +467,7 @@ impl State<Candidate> {
         info!("{:?}: Starting election", self.data.id);
 
         self.data.persistent.current_term += 1;
+        self.data.persistent.voted_for = None;
 
         let message = Message::RequestVoteRequest(RequestVoteArguments::new(
             self.data.persistent.current_term,
