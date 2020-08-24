@@ -136,10 +136,7 @@ impl ServerState {
                 }) => {
                     debug!("{:?}: <<< {:?}", state.data.id, message);
 
-                    if state.update_term_if_outdated(&message) {
-                        state
-                            .send_message(message, Target::Server(state.data.id))
-                            .await;
+                    if state.update_term_if_outdated(message.clone()).await {
                         return ServerState::Follower(state.become_follower());
                     }
 
@@ -222,10 +219,7 @@ impl ServerState {
                 }) => {
                     debug!("{:?}: <<< {:?}", state.data.id, message);
 
-                    if state.update_term_if_outdated(&message) {
-                        state
-                            .send_message(message, Target::Server(state.data.id))
-                            .await;
+                    if state.update_term_if_outdated(message.clone()).await {
                         return ServerState::Follower(state.become_follower());
                     }
 
@@ -280,10 +274,7 @@ impl ServerState {
                 }) => {
                     debug!("{:?}: <<< {:?}", state.data.id, message);
 
-                    if state.update_term_if_outdated(&message) {
-                        state
-                            .send_message(message, Target::Server(state.data.id))
-                            .await;
+                    if state.update_term_if_outdated(message.clone()).await {
                         return ServerState::Follower(state.become_follower());
                     }
 
@@ -363,8 +354,8 @@ impl<S: IsServerState> State<S> {
             .await;
     }
 
-    fn update_term_if_outdated(&mut self, message: &Message) -> bool {
-        let term = match message {
+    async fn update_term_if_outdated(&mut self, message: Arc<Message>) -> bool {
+        let term = match message.as_ref() {
             Message::RequestVoteRequest(args) => args.term,
             Message::RequestVoteResponse(results) => results.term,
             Message::AppendEntriesRequest(args) => args.term,
@@ -379,6 +370,11 @@ impl<S: IsServerState> State<S> {
                 self.data.id, term.0, current_term.0
             );
             self.data.persistent.current_term = term;
+
+            // Resend the original message so that it's processed after the state transition
+            self.send_message(message, Target::Server(self.data.id))
+                .await;
+
             true
         } else {
             false
