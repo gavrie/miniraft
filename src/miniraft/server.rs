@@ -1,4 +1,3 @@
-use async_std::future;
 use async_std::prelude::*;
 use async_std::sync::{self, Receiver, Sender};
 use async_std::task;
@@ -115,12 +114,10 @@ enum LeaderEvent {
 
 impl ServerState {
     async fn next(self) -> Self {
-        use ServerState::*;
-
         match self {
-            Follower(state) => Self::handle_follower(state).await,
-            Candidate(state) => Self::handle_candidate(state).await,
-            Leader(state) => Self::handle_leader(state).await,
+            ServerState::Follower(state) => Self::handle_follower(state).await,
+            ServerState::Candidate(state) => Self::handle_candidate(state).await,
+            ServerState::Leader(state) => Self::handle_leader(state).await,
         }
     }
 
@@ -132,41 +129,50 @@ impl ServerState {
 
         while let Some(event) = events.next().await {
             match event {
-                FollowerEvent::FramedMessage(frame) => {
-                    debug!("{:?}: <<< {:?}", state.data.id, frame.message);
-                    use Message::*;
+                FollowerEvent::FramedMessage(FramedMessage {
+                    source,
+                    target: _,
+                    message,
+                }) => {
+                    debug!("{:?}: <<< {:?}", state.data.id, message);
 
-                    let message = frame.message.as_ref();
-                    state.update_term_if_outdated(message);
+                    if state.update_term_if_outdated(&message) {
+                        state
+                            .send_message(message, Target::Server(state.data.id))
+                            .await;
+                        return ServerState::Follower(state.become_follower());
+                    }
 
-                    match message {
-                        RequestVoteRequest(args) => {
+                    match message.as_ref() {
+                        Message::RequestVoteRequest(args) => {
                             if !has_voted {
                                 has_voted = true;
                                 state.vote(args).await;
+                            } else {
+                                debug!("{:?}: Already voted in this term", state.data.id,);
                             }
                         }
 
-                        AppendEntriesRequest(args) => {
+                        Message::AppendEntriesRequest(_args) => {
                             // Reset election timeout
                             received_heartbeat = true;
                             state.state.election_timeout =
                                 state.state.election_timeout.reset_election_timeout().await;
 
                             // Respond to leader
-                            let response = AppendEntriesResponse(AppendEntriesResults {
+                            let response = Message::AppendEntriesResponse(AppendEntriesResults {
                                 term: state.data.persistent.current_term,
                                 success: true, // TODO
                             });
 
                             state
-                                .send_message(Arc::new(response), Target::Server(frame.source))
+                                .send_message(Arc::new(response), Target::Server(source))
                                 .await;
                         }
 
-                        RequestVoteResponse(_results) => {}
+                        Message::RequestVoteResponse(_results) => {}
 
-                        AppendEntriesResponse(_results) => {}
+                        Message::AppendEntriesResponse(_results) => {}
                     }
                 }
                 FollowerEvent::ElectionTimeout(duration) => {
@@ -195,47 +201,52 @@ impl ServerState {
     }
 
     async fn handle_candidate(mut state: State<Candidate>) -> Self {
-        use ServerState::*;
-
         let num_servers = 3; // FIXME: Don't hardcode but get from Cluster
         let mut num_votes = 1; // Vote for self
+
+        let has_quorum = |num_votes| num_votes * 2 > num_servers;
+
         let mut events = state.events();
 
         while let Some(event) = events.next().await {
             match event {
-                FollowerEvent::FramedMessage(frame) => {
-                    debug!("{:?}: <<< {:?}", state.data.id, frame.message);
-                    use Message::*;
+                FollowerEvent::FramedMessage(FramedMessage {
+                    source,
+                    target: _,
+                    message,
+                }) => {
+                    debug!("{:?}: <<< {:?}", state.data.id, message);
 
-                    let message = frame.message.as_ref();
-                    if state.update_term_if_outdated(message) {
+                    if state.update_term_if_outdated(&message) {
                         state
-                            .send_message(frame.message, Target::Server(state.data.id))
+                            .send_message(message, Target::Server(state.data.id))
                             .await;
-                        return Follower(state.become_follower());
+                        return ServerState::Follower(state.become_follower());
                     }
 
-                    match message {
-                        RequestVoteRequest(args) => {
+                    match message.as_ref() {
+                        Message::RequestVoteRequest(args) => {
                             state.vote(args).await;
                         }
-                        RequestVoteResponse(results) => {
+                        Message::RequestVoteResponse(results) => {
                             if results.vote_granted {
-                                info!("{:?}: Received vote from {:?}", state.data.id, frame.source);
+                                info!(
+                                    "{:?}: Received vote from {:?} ({}/{})",
+                                    state.data.id, source, num_votes, num_servers
+                                );
                                 num_votes += 1;
 
-                                // Do we have a majority vote?
-                                if num_votes >= num_servers / 2 + 1 {
+                                if has_quorum(num_votes) {
                                     info!(
                                         "{:?}: Got {}/{} votes",
                                         state.data.id, num_votes, num_servers
                                     );
-                                    return Leader(state.become_leader());
+                                    return ServerState::Leader(state.become_leader());
                                 }
                             }
                         }
-                        AppendEntriesRequest(_args) => {}
-                        AppendEntriesResponse(_results) => {}
+                        Message::AppendEntriesRequest(_args) => {}
+                        Message::AppendEntriesResponse(_results) => {}
                     }
                 }
                 FollowerEvent::ElectionTimeout(duration) => {
@@ -243,7 +254,7 @@ impl ServerState {
                         "{:?}: Election timed out after {:?}, starting new election",
                         state.data.id, duration,
                     );
-                    return Candidate(state.start_election().await);
+                    return ServerState::Candidate(state.start_election().await);
                 }
             }
         }
@@ -252,30 +263,31 @@ impl ServerState {
     }
 
     async fn handle_leader(mut state: State<Leader>) -> Self {
-        use ServerState::*;
-
         let mut events = state.events();
+
         while let Some(event) = events.next().await {
             match event {
-                LeaderEvent::FramedMessage(frame) => {
-                    debug!("{:?}: <<< {:?}", state.data.id, frame.message);
-                    use Message::*;
+                LeaderEvent::FramedMessage(FramedMessage {
+                    source: _,
+                    target: _,
+                    message,
+                }) => {
+                    debug!("{:?}: <<< {:?}", state.data.id, message);
 
-                    let message = frame.message.as_ref();
-                    if state.update_term_if_outdated(message) {
+                    if state.update_term_if_outdated(&message) {
                         state
-                            .send_message(frame.message, Target::Server(state.data.id))
+                            .send_message(message, Target::Server(state.data.id))
                             .await;
-                        return Follower(state.become_follower());
+                        return ServerState::Follower(state.become_follower());
                     }
 
-                    match message {
-                        RequestVoteRequest(args) => {
+                    match message.as_ref() {
+                        Message::RequestVoteRequest(args) => {
                             state.vote(args).await;
                         }
-                        RequestVoteResponse(_results) => {}
-                        AppendEntriesRequest(_args) => {}
-                        AppendEntriesResponse(_results) => {}
+                        Message::RequestVoteResponse(_results) => {}
+                        Message::AppendEntriesRequest(_args) => {}
+                        Message::AppendEntriesResponse(_results) => {}
                     }
                 }
                 LeaderEvent::Heartbeat(_) => {
@@ -283,6 +295,7 @@ impl ServerState {
                 }
             }
         }
+
         panic!("should not get here");
     }
 }
@@ -304,7 +317,7 @@ struct ServerData {
 
 impl<S: IsServerState> State<S> {
     async fn send_message(&self, message: Arc<Message>, target: Target) {
-        info!("{:?}: >>> [{:?}] {:?}", self.data.id, target, message);
+        debug!("{:?}: >>> [{:?}] {:?}", self.data.id, target, message);
 
         self.data
             .sender
@@ -417,7 +430,7 @@ impl State<Follower> {
     async fn become_candidate(self) -> State<Candidate> {
         info!("{:?}: Becoming candidate", self.data.id);
 
-        let mut state = State {
+        let state = State {
             state: Candidate {
                 election_timeout: ElectionTimeout::new(self.data.id),
             },
@@ -513,7 +526,7 @@ impl State<Leader> {
     }
 
     async fn send_heartbeat(&self) {
-        info!("{:?}: Sending heartbeat", self.data.id);
+        debug!("{:?}: Sending heartbeat", self.data.id);
 
         let message = Message::AppendEntriesRequest(AppendEntriesArguments {
             term: self.data.persistent.current_term,
