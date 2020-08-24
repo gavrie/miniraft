@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use super::rpc::Message;
 use super::state::*;
+use crate::miniraft::client::ClientRequest;
 use crate::miniraft::rpc::{
     AppendEntriesArguments, AppendEntriesResults, FramedMessage, RequestVoteArguments,
     RequestVoteResults, Target,
@@ -27,6 +28,7 @@ struct Candidate {
 
 struct Leader {
     heartbeat_interval: Receiver<()>,
+    client_requests: Receiver<ClientRequest>,
     volatile: VolatileDataForLeader,
 }
 
@@ -110,6 +112,7 @@ enum FollowerEvent {
 enum LeaderEvent {
     Heartbeat(()),
     FramedMessage(FramedMessage),
+    ClientRequest(ClientRequest),
 }
 
 impl ServerState {
@@ -287,6 +290,9 @@ impl ServerState {
                 }
                 LeaderEvent::Heartbeat(_) => {
                     state.send_heartbeat().await;
+                }
+                LeaderEvent::ClientRequest(request) => {
+                    info!("{:?}: <<< {:?}", state.data.id, request);
                 }
             }
         }
@@ -506,6 +512,7 @@ impl State<Candidate> {
             state: Leader {
                 volatile: VolatileDataForLeader::new(),
                 heartbeat_interval: State::start_heartbeat(self.data.id),
+                client_requests: State::start_simulated_client_requests(self.data.id),
             },
             data: ServerData {
                 id: self.data.id,
@@ -538,6 +545,33 @@ impl State<Leader> {
         rx
     }
 
+    fn start_simulated_client_requests(server_id: ServerId) -> Receiver<ClientRequest> {
+        let interval = Duration::from_millis(1000);
+
+        let (tx, rx) = sync::channel(1);
+
+        let mut i = 1;
+
+        let _handle = task::spawn(async move {
+            loop {
+                let request = ClientRequest {
+                    command: Command(format!("set x={}", i)),
+                };
+
+                info!(
+                    "{:?}: Sending simulated client request: {:?}",
+                    server_id, request
+                );
+                tx.send(request).await;
+                i += 1;
+
+                task::sleep(interval).await;
+            }
+        });
+
+        rx
+    }
+
     fn events(&self) -> impl Stream<Item = LeaderEvent> {
         // Wait for RPC request or response, or election timeout
         let messages = self.data.receiver.clone().map(LeaderEvent::FramedMessage);
@@ -548,7 +582,13 @@ impl State<Leader> {
             .clone()
             .map(LeaderEvent::Heartbeat);
 
-        let events = timeouts.merge(messages);
+        let client_requests = self
+            .state
+            .client_requests
+            .clone()
+            .map(LeaderEvent::ClientRequest);
+
+        let events = messages.merge(timeouts).merge(client_requests);
         events
     }
 

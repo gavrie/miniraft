@@ -17,7 +17,7 @@ pub struct LogIndex(pub u32);
 
 // Command for state machine
 #[derive(Debug, Clone)]
-struct Command;
+pub struct Command(pub String);
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd)]
 pub struct Term(pub u32);
