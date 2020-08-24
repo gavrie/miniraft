@@ -204,6 +204,11 @@ impl ServerState {
         let num_servers = 3; // FIXME: Don't hardcode but get from Cluster
         let mut num_votes = 1; // Vote for self
 
+        info!(
+            "{:?}: Voted for self ({}/{})",
+            state.data.id, num_votes, num_servers
+        );
+
         let has_quorum = |num_votes| num_votes * 2 > num_servers;
 
         let mut events = state.events();
@@ -230,15 +235,16 @@ impl ServerState {
                         }
                         Message::RequestVoteResponse(results) => {
                             if results.vote_granted {
+                                num_votes += 1;
+
                                 info!(
                                     "{:?}: Received vote from {:?} ({}/{})",
                                     state.data.id, source, num_votes, num_servers
                                 );
-                                num_votes += 1;
 
                                 if has_quorum(num_votes) {
                                     info!(
-                                        "{:?}: Got {}/{} votes",
+                                        "{:?}: Got majority of {}/{} votes",
                                         state.data.id, num_votes, num_servers
                                     );
                                     return ServerState::Leader(state.become_leader());
