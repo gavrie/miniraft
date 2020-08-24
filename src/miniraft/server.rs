@@ -224,9 +224,7 @@ impl ServerState {
                     }
 
                     match message.as_ref() {
-                        Message::RequestVoteRequest(args) => {
-                            state.vote(args).await;
-                        }
+                        Message::RequestVoteRequest(_args) => {}
                         Message::RequestVoteResponse(results) => {
                             if results.vote_granted {
                                 num_votes += 1;
@@ -245,7 +243,12 @@ impl ServerState {
                                 }
                             }
                         }
-                        Message::AppendEntriesRequest(_args) => {}
+                        Message::AppendEntriesRequest(args) => {
+                            // If another legitimate leader appeared, we recognize it
+                            if args.term >= state.data.persistent.current_term {
+                                return ServerState::Follower(state.become_follower());
+                            }
+                        }
                         Message::AppendEntriesResponse(_results) => {}
                     }
                 }
@@ -279,9 +282,7 @@ impl ServerState {
                     }
 
                     match message.as_ref() {
-                        Message::RequestVoteRequest(args) => {
-                            state.vote(args).await;
-                        }
+                        Message::RequestVoteRequest(_args) => {}
                         Message::RequestVoteResponse(_results) => {}
                         Message::AppendEntriesRequest(_args) => {}
                         Message::AppendEntriesResponse(_results) => {}
@@ -326,15 +327,31 @@ impl<S: IsServerState> State<S> {
             .await;
     }
 
-    async fn vote(&self, args: &RequestVoteArguments) {
-        let voted_for = self.data.persistent.voted_for;
+    async fn vote(&mut self, args: &RequestVoteArguments) {
         let vote_granted = {
             if args.term < self.data.persistent.current_term {
+                info!(
+                    "{:?}: Requested vote with stale term {:?}, refusing",
+                    self.data.id, args.term
+                );
                 false
             } else {
-                (voted_for == None || voted_for == Some(args.candidate_id)) && {
+                let voted_for = self.data.persistent.voted_for;
+
+                if voted_for == None || voted_for == Some(args.candidate_id) {
                     // TODO: Check if candidate's log is at least as up-to-date as receiver's log
+                    info!(
+                        "{:?}: Granting vote to {:?}",
+                        self.data.id, args.candidate_id
+                    );
+                    self.data.persistent.voted_for = Some(args.candidate_id);
                     true
+                } else {
+                    info!(
+                        "{:?}: Already voted for {:?}, not granting",
+                        self.data.id, args.candidate_id
+                    );
+                    false
                 }
             }
         };
@@ -381,9 +398,7 @@ impl<S: IsServerState> State<S> {
         }
     }
 
-    fn become_follower(self) -> State<Follower> {
-        info!("{:?}: Becoming follower", self.data.id);
-
+    fn become_follower2(self) -> State<Follower> {
         State {
             state: Follower {
                 election_timeout: ElectionTimeout::new(self.data.id),
@@ -429,6 +444,11 @@ impl State<Follower> {
         events
     }
 
+    fn become_follower(self) -> State<Follower> {
+        info!("{:?}: Staying follower", self.data.id);
+        self.become_follower2()
+    }
+
     async fn become_candidate(self) -> State<Candidate> {
         info!("{:?}: Becoming candidate", self.data.id);
 
@@ -472,6 +492,11 @@ impl State<Candidate> {
 
         let events = election_timeout.merge(messages);
         events
+    }
+
+    fn become_follower(self) -> State<Follower> {
+        info!("{:?}: Becoming follower", self.data.id);
+        self.become_follower2()
     }
 
     fn become_leader(self) -> State<Leader> {
@@ -540,6 +565,11 @@ impl State<Leader> {
         });
 
         self.send_message(Arc::new(message), Target::All).await;
+    }
+
+    fn become_follower(self) -> State<Follower> {
+        info!("{:?}: Becoming follower", self.data.id);
+        self.become_follower2()
     }
 }
 
