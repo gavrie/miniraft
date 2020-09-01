@@ -14,11 +14,13 @@ impl Cluster {
     pub async fn new(num_servers: u32) -> Result<Cluster> {
         let (tx, rx) = sync::channel(1);
 
-        let servers: HashMap<_, _> = (1..=num_servers)
+        let server_ids: Vec<_> = (1..=num_servers).map(ServerId).collect();
+
+        let servers: HashMap<_, _> = server_ids
+            .iter()
             .map(|id| {
-                let server_id = ServerId(id);
-                let server = Server::new(server_id, tx.clone());
-                (server_id, server)
+                let server = Server::new(id.clone(), server_ids.clone(), tx.clone());
+                (id.clone(), server)
             })
             .collect();
 

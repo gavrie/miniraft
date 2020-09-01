@@ -4,6 +4,7 @@ use async_std::task;
 use async_std::task::JoinHandle;
 use log::{debug, error, info};
 use rand::prelude::*;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -68,11 +69,11 @@ struct VolatileData {
 #[derive(Debug)]
 struct VolatileDataForLeader {
     // For each server, index of the next log entry to send to that server
-    // (initialized to leader last log index + 1)
-    next_indexes: Vec<LogIndex>,
+    // (initialized to leader last log index + 1) <== TODO
+    next_indexes: HashMap<ServerId, LogIndex>,
     // For each server, index of highest log entry known to be replicated on server
-    // (initialized to 0, increases monotonically)
-    match_indexes: Vec<LogIndex>,
+    // (initialized to 0, increases monotonically) <== TODO
+    match_indexes: HashMap<ServerId, LogIndex>,
 }
 
 #[derive(Debug)]
@@ -113,13 +114,14 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn new(id: ServerId, cluster_tx: Sender<FramedMessage>) -> Self {
+    pub fn new(id: ServerId, server_ids: Vec<ServerId>, cluster_tx: Sender<FramedMessage>) -> Self {
         let (server_tx, server_rx) = sync::channel(1);
 
         info!("{:?}: Started server", id);
 
         let handle = task::spawn(async move {
-            let mut state = ServerState::Follower(State::new(id, cluster_tx, server_rx));
+            let mut state =
+                ServerState::Follower(State::new(id, server_ids, cluster_tx, server_rx));
             loop {
                 state = state.next().await;
             }
@@ -363,22 +365,58 @@ impl ServerState {
                     }];
 
                     log.append(entries.clone());
-
-                    // Send to other servers
-                    let message = Message::AppendEntriesRequest(AppendEntriesArguments {
-                        term: state.data.persistent.current_term,
-                        leader_id: state.data.id,
-                        entries,
-                        prev_log_index: log.last_index(),
-                        prev_log_term: log.last_term(),
-                        leader_commit: state.data.volatile.commit_index,
-                    });
-
-                    state.send_message(Arc::new(message), Target::All).await;
                 }
             }
 
-            // TODO: Replicate any pending log entries to clients
+            // TODO: Replicate any pending log entries to other servers
+            {
+                let log = &state.data.persistent.log;
+
+                for follower_id in state.data.server_ids.iter().cloned() {
+                    if follower_id == state.data.id {
+                        // Don't send messages to ourselves
+                        // TODO: Make sure we send only to servers that are followers?
+                        continue;
+                    }
+
+                    let volatile = &mut state.state.volatile;
+                    let next_index = volatile.next_indexes.get_mut(&follower_id).unwrap();
+                    let match_index = volatile.match_indexes.get_mut(&follower_id).unwrap();
+
+                    if &log.last_index() >= next_index {
+                        // Send only entries that the server doesn't yet have
+                        let entry_slice = &log.0[next_index.zero_based()..];
+                        let entries: Vec<_> = entry_slice.iter().cloned().collect();
+
+                        let message = Message::AppendEntriesRequest(AppendEntriesArguments {
+                            term: state.data.persistent.current_term,
+                            leader_id: state.data.id,
+                            entries,
+                            prev_log_index: log.last_index(),
+                            prev_log_term: log.last_term(),
+                            leader_commit: state.data.volatile.commit_index,
+                        });
+
+                        // TODO: Add a serial number or UUID to each message when sending it,
+                        // and use the channel to send the response when it arrives.
+                        // TODO: How do we handle this concurrently for many followers?
+
+                        // let (tx, rx) = sync::channel(1);
+                        state
+                            .send_message(Arc::new(message), Target::Server(follower_id))
+                            .await;
+
+                        /*
+                        // TODO: Wait for response, and update next_index and match_index
+                        let success: bool = rx.recv().await?;
+                        if success {
+                            *next_index = ...;
+                            *match_index = ...;
+                        }
+                        */
+                    }
+                }
+            }
 
             // TODO: Respond to pending clients after entries are committed and applied locally
         }
@@ -396,6 +434,7 @@ pub struct State<S: IsServerState> {
 #[derive(Debug)]
 struct ServerData {
     id: ServerId,
+    server_ids: Vec<ServerId>,
     persistent: PersistentData,
     volatile: VolatileData,
     sender: Sender<FramedMessage>,
@@ -458,6 +497,7 @@ impl<S: IsServerState> State<S> {
 impl State<Follower> {
     pub fn new(
         id: ServerId,
+        server_ids: Vec<ServerId>,
         sender: Sender<FramedMessage>,
         receiver: Receiver<FramedMessage>,
     ) -> Self {
@@ -467,6 +507,7 @@ impl State<Follower> {
             },
             data: ServerData {
                 id,
+                server_ids,
                 persistent: PersistentData::new(),
                 volatile: VolatileData::new(),
                 sender,
@@ -653,14 +694,27 @@ impl State<Candidate> {
         let state = State {
             state: Leader {
                 volatile: VolatileDataForLeader {
-                    next_indexes: vec![], // TODO: Initialize for all servers
-                    match_indexes: vec![],
+                    next_indexes: self
+                        .data
+                        .server_ids
+                        .iter()
+                        .map(|id| (id.clone(), self.data.persistent.log.last_index() + 1))
+                        .collect(),
+
+                    match_indexes: self
+                        .data
+                        .server_ids
+                        .iter()
+                        .map(|id| (id.clone(), LogIndex::ZERO))
+                        .collect(),
                 },
                 heartbeat_interval: State::start_heartbeat(self.data.id),
                 client_requests: State::start_simulated_client_requests(self.data.id),
             },
+
             data: ServerData {
                 id: self.data.id,
+                server_ids: self.data.server_ids,
                 persistent: self.data.persistent,
                 volatile: self.data.volatile,
                 sender: self.data.sender,
