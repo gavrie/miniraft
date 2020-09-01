@@ -2,8 +2,7 @@ use async_std::prelude::*;
 use async_std::sync::{self, Receiver, Sender};
 use async_std::task;
 use async_std::task::JoinHandle;
-use log::debug;
-use log::info;
+use log::{debug, error, info};
 use rand::prelude::*;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -147,16 +146,19 @@ impl ServerState {
                             state.vote(args).await;
                         }
 
-                        Message::AppendEntriesRequest(_args) => {
+                        Message::AppendEntriesRequest(args) => {
                             // Reset election timeout
                             received_heartbeat = true;
                             state.state.election_timeout =
                                 state.state.election_timeout.reset_election_timeout().await;
 
+                            // Process entries
+                            let success = state.append_entries(&args);
+
                             // Respond to leader
                             let response = Message::AppendEntriesResponse(AppendEntriesResults {
                                 term: state.data.persistent.current_term,
-                                success: true, // TODO
+                                success,
                             });
 
                             state
@@ -164,9 +166,13 @@ impl ServerState {
                                 .await;
                         }
 
-                        Message::RequestVoteResponse(_results) => {}
+                        Message::RequestVoteResponse(_results) => {
+                            error!("Follower received RequestVote response")
+                        }
 
-                        Message::AppendEntriesResponse(_results) => {}
+                        Message::AppendEntriesResponse(_results) => {
+                            error!("Follower received AppendEntries response")
+                        }
                     }
                 }
                 FollowerEvent::ElectionTimeout(duration) => {
@@ -249,7 +255,9 @@ impl ServerState {
                                 return ServerState::Follower(state.become_follower());
                             }
                         }
-                        Message::AppendEntriesResponse(_results) => {}
+                        Message::AppendEntriesResponse(_results) => {
+                            error!("Candidate received AppendEntries response");
+                        }
                     }
                 }
                 FollowerEvent::ElectionTimeout(duration) => {
@@ -282,19 +290,66 @@ impl ServerState {
                     }
 
                     match message.as_ref() {
-                        Message::RequestVoteRequest(_args) => {}
-                        Message::RequestVoteResponse(_results) => {}
-                        Message::AppendEntriesRequest(_args) => {}
-                        Message::AppendEntriesResponse(_results) => {}
+                        Message::RequestVoteRequest(_args) => {
+                            error!("Leader received RequestVote request");
+                        }
+                        Message::RequestVoteResponse(_results) => {
+                            debug!("Leader received RequestVote response, ignoring");
+                        }
+                        Message::AppendEntriesRequest(_args) => {
+                            error!("Leader received AppendEntries request");
+                        }
+                        Message::AppendEntriesResponse(results) => {
+                            info!(
+                                "Leader received AppendEntries response: {}",
+                                results.success
+                            );
+
+                            // TODO: Add identifier to tie response to request
+                            // (keep in mind that the response may be to a heartbeat)
+
+                            // TODO: Handle response (5.3):
+                            // - If successful, update next_index and match_index for follower
+                            // - If failed, decrement next_index and retry
+                        }
                     }
                 }
+
                 LeaderEvent::Heartbeat(_) => {
                     state.send_heartbeat().await;
                 }
+
                 LeaderEvent::ClientRequest(request) => {
                     info!("{:?}: <<< {:?}", state.data.id, request);
+
+                    let entry = LogEntry {
+                        command: request.command,
+                        term: state.data.persistent.current_term,
+                    };
+
+                    // Append to log
+                    let log = &mut state.data.persistent.log;
+                    let prev_log_index = LogIndex(log.len());
+
+                    let prev_log_term = log.last().map(|l| l.term).unwrap_or(Term(0));
+
+                    log.push(entry.clone());
+
+                    // Send to other servers
+                    let message = Message::AppendEntriesRequest(AppendEntriesArguments {
+                        term: state.data.persistent.current_term,
+                        leader_id: state.data.id,
+                        entries: vec![entry],
+                        prev_log_index,
+                        prev_log_term,
+                        leader_commit: state.data.volatile.commit_index,
+                    });
+
+                    state.send_message(Arc::new(message), Target::All).await;
                 }
             }
+
+            // TODO: Replicate any pending log entries to clients
         }
 
         panic!("should not get here");
@@ -466,6 +521,49 @@ impl State<Follower> {
         self.send_message(Arc::new(message), Target::Server(server_id))
             .await;
     }
+
+    fn append_entries(&mut self, args: &AppendEntriesArguments) -> bool {
+        let log = &mut self.data.persistent.log;
+
+        // Figure 2: Receiver implementation
+
+        // 1. Require at least current term
+        if args.term < self.data.persistent.current_term {
+            return false;
+        }
+
+        // 2, 3. Check safety property
+        if args.prev_log_index != LogIndex(0) {
+            let prev_index = args.prev_log_index.0 - 1;
+
+            if let Some(entry) = log.get(prev_index) {
+                // Ensure previous entry has right term
+                if entry.term != args.prev_log_term {
+                    // Remove conflicting entries
+                    log.truncate(prev_index);
+                    return false;
+                }
+            }
+        }
+
+        // 4. Append any missing new entries
+        log.extend_from_slice(&args.entries);
+
+        // 5. Handle commits
+        if args.leader_commit > self.data.volatile.commit_index {
+            self.data.volatile.commit_index = args.leader_commit.min(LogIndex(log.len()));
+        }
+
+        if !args.entries.is_empty() {
+            info!(
+                "{:?}: Current log [committed: {:?}: {:?}",
+                self.data.id, self.data.volatile.commit_index, log
+            );
+        }
+
+        // We made it here successfully
+        true
+    }
 }
 
 impl State<Candidate> {
@@ -546,7 +644,8 @@ impl State<Leader> {
     }
 
     fn start_simulated_client_requests(server_id: ServerId) -> Receiver<ClientRequest> {
-        let interval = Duration::from_millis(1000);
+        let interval = Duration::from_secs(3600);
+        //let interval = Duration::from_millis(1000);
 
         let (tx, rx) = sync::channel(1);
 
@@ -598,10 +697,10 @@ impl State<Leader> {
         let message = Message::AppendEntriesRequest(AppendEntriesArguments {
             term: self.data.persistent.current_term,
             leader_id: self.data.id,
+            entries: vec![],
             prev_log_index: LogIndex(0), // TODO
             prev_log_term: Term(0),      // TODO
-            entries: vec![],
-            leader_commit: LogIndex(0), // TODO
+            leader_commit: LogIndex(0),  // TODO
         });
 
         self.send_message(Arc::new(message), Target::All).await;

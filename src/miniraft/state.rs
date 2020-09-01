@@ -6,14 +6,14 @@ pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
 #[derive(Debug, Clone)]
 pub struct LogEntry {
     // Command for state machine
-    command: Command,
+    pub command: Command,
 
     // Term when entry was received by leader (first index is 1)
-    term: Term,
+    pub term: Term,
 }
 
-#[derive(Copy, Clone, Debug)]
-pub struct LogIndex(pub u32);
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct LogIndex(pub usize);
 
 // Command for state machine
 #[derive(Debug, Clone)]
