@@ -33,21 +33,10 @@ pub struct RequestVoteArguments {
     pub candidate_id: ServerId,
 
     // Index of candidate’s last log entry (§5.4)
-    last_log_index: LogIndex,
+    pub last_log_index: LogIndex,
 
     // Term of candidate’s last log entry (§5.4)
-    last_log_term: Term,
-}
-
-impl RequestVoteArguments {
-    pub fn new(term: Term, candidate_id: ServerId) -> Self {
-        Self {
-            term,
-            candidate_id,
-            last_log_index: LogIndex(0), // TODO
-            last_log_term: Term(0),      // TODO
-        }
-    }
+    pub last_log_term: Term,
 }
 
 #[derive(Debug)]

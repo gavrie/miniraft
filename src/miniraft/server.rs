@@ -40,6 +40,8 @@ impl IsServerState for Leader {}
 
 // Persistent State on all servers.
 // (Updated on stable storage before responding to RPCs)
+// TODO: Actually make the data persistent, by disallowing direct mutation and instead
+// using mutators that sync to storage.
 #[derive(Debug)]
 struct PersistentData {
     // Latest Term server has seen (initialized to 0 on first boot, increases monotonically)
@@ -49,7 +51,7 @@ struct PersistentData {
     voted_for: Option<ServerId>,
 
     // Log entries
-    log: Vec<LogEntry>,
+    log: Log,
 }
 
 // Volatile State on all servers.
@@ -71,6 +73,36 @@ struct VolatileDataForLeader {
     // For each server, index of highest log entry known to be replicated on server
     // (initialized to 0, increases monotonically)
     match_indexes: Vec<LogIndex>,
+}
+
+#[derive(Debug)]
+struct Log(Vec<LogEntry>);
+
+/// The actual log. Indexes are 1-based.
+impl Log {
+    fn new() -> Self {
+        Self(Vec::new())
+    }
+
+    fn append(&mut self, mut entries: Vec<LogEntry>) {
+        self.0.append(entries.as_mut())
+    }
+
+    fn last_index(&self) -> LogIndex {
+        LogIndex::new(self.0.len())
+    }
+
+    fn last_term(&self) -> Term {
+        self.0.last().map(|l| l.term).unwrap_or(Term(0))
+    }
+
+    fn get(&self, index: LogIndex) -> Option<&LogEntry> {
+        self.0.get(index.zero_based())
+    }
+
+    fn truncate(&mut self, index: LogIndex) {
+        self.0.truncate(index.zero_based())
+    }
 }
 
 //////////////////////////////////
@@ -322,26 +354,23 @@ impl ServerState {
                 LeaderEvent::ClientRequest(request) => {
                     info!("{:?}: <<< {:?}", state.data.id, request);
 
-                    let entry = LogEntry {
+                    let log = &mut state.data.persistent.log;
+
+                    // Append new entry
+                    let entries = vec![LogEntry {
                         command: request.command,
                         term: state.data.persistent.current_term,
-                    };
+                    }];
 
-                    // Append to log
-                    let log = &mut state.data.persistent.log;
-                    let prev_log_index = LogIndex(log.len());
-
-                    let prev_log_term = log.last().map(|l| l.term).unwrap_or(Term(0));
-
-                    log.push(entry.clone());
+                    log.append(entries.clone());
 
                     // Send to other servers
                     let message = Message::AppendEntriesRequest(AppendEntriesArguments {
                         term: state.data.persistent.current_term,
                         leader_id: state.data.id,
-                        entries: vec![entry],
-                        prev_log_index,
-                        prev_log_term,
+                        entries,
+                        prev_log_index: log.last_index(),
+                        prev_log_term: log.last_term(),
                         leader_commit: state.data.volatile.commit_index,
                     });
 
@@ -350,6 +379,8 @@ impl ServerState {
             }
 
             // TODO: Replicate any pending log entries to clients
+
+            // TODO: Respond to pending clients after entries are committed and applied locally
         }
 
         panic!("should not get here");
@@ -532,26 +563,35 @@ impl State<Follower> {
             return false;
         }
 
-        // 2, 3. Check safety property
-        if args.prev_log_index != LogIndex(0) {
-            let prev_index = args.prev_log_index.0 - 1;
-
-            if let Some(entry) = log.get(prev_index) {
+        // 2. Check safety property
+        if args.prev_log_index != LogIndex::ZERO {
+            if let Some(entry) = log.get(args.prev_log_index) {
                 // Ensure previous entry has right term
                 if entry.term != args.prev_log_term {
-                    // Remove conflicting entries
-                    log.truncate(prev_index);
                     return false;
                 }
             }
         }
 
+        // 3. Discard any conflicting local entries
+        let mut index = args.prev_log_index + 1;
+        for entry in args.entries.iter() {
+            if let Some(existing_entry) = log.get(index) {
+                if existing_entry.term != entry.term {
+                    // Remove conflicting entries
+                    log.truncate(args.prev_log_index);
+                    return false;
+                }
+            }
+            index += 1;
+        }
+
         // 4. Append any missing new entries
-        log.extend_from_slice(&args.entries);
+        log.append(args.entries.clone());
 
         // 5. Handle commits
         if args.leader_commit > self.data.volatile.commit_index {
-            self.data.volatile.commit_index = args.leader_commit.min(LogIndex(log.len()));
+            self.data.volatile.commit_index = args.leader_commit.min(log.last_index());
         }
 
         if !args.entries.is_empty() {
@@ -570,13 +610,17 @@ impl State<Candidate> {
     async fn start_election(mut self) -> Self {
         info!("{:?}: Starting election", self.data.id);
 
-        self.data.persistent.current_term += 1;
-        self.data.persistent.voted_for = None;
+        let persistent = &mut self.data.persistent;
 
-        let message = Message::RequestVoteRequest(RequestVoteArguments::new(
-            self.data.persistent.current_term,
-            self.data.id,
-        ));
+        persistent.current_term += 1;
+        persistent.voted_for = None;
+
+        let message = Message::RequestVoteRequest(RequestVoteArguments {
+            term: persistent.current_term,
+            candidate_id: self.data.id,
+            last_log_index: persistent.log.last_index(),
+            last_log_term: persistent.log.last_term(),
+        });
 
         self.send_message(Arc::new(message), Target::All).await;
 
@@ -608,7 +652,10 @@ impl State<Candidate> {
 
         let state = State {
             state: Leader {
-                volatile: VolatileDataForLeader::new(),
+                volatile: VolatileDataForLeader {
+                    next_indexes: vec![], // TODO: Initialize for all servers
+                    match_indexes: vec![],
+                },
                 heartbeat_interval: State::start_heartbeat(self.data.id),
                 client_requests: State::start_simulated_client_requests(self.data.id),
             },
@@ -694,13 +741,15 @@ impl State<Leader> {
     async fn send_heartbeat(&self) {
         debug!("{:?}: Sending heartbeat", self.data.id);
 
+        let persistent = &self.data.persistent;
+
         let message = Message::AppendEntriesRequest(AppendEntriesArguments {
-            term: self.data.persistent.current_term,
+            term: persistent.current_term,
             leader_id: self.data.id,
             entries: vec![],
-            prev_log_index: LogIndex(0), // TODO
-            prev_log_term: Term(0),      // TODO
-            leader_commit: LogIndex(0),  // TODO
+            prev_log_index: persistent.log.last_index(),
+            prev_log_term: persistent.log.last_term(),
+            leader_commit: self.data.volatile.commit_index,
         });
 
         self.send_message(Arc::new(message), Target::All).await;
@@ -764,7 +813,7 @@ impl PersistentData {
         Self {
             current_term: Term(0),
             voted_for: None,
-            log: Vec::new(),
+            log: Log::new(),
         }
     }
 }
@@ -772,17 +821,8 @@ impl PersistentData {
 impl VolatileData {
     fn new() -> Self {
         Self {
-            commit_index: LogIndex(0),
-            last_applied: LogIndex(0),
-        }
-    }
-}
-
-impl VolatileDataForLeader {
-    fn new() -> Self {
-        Self {
-            next_indexes: vec![],
-            match_indexes: vec![],
+            commit_index: LogIndex::ZERO,
+            last_applied: LogIndex::ZERO,
         }
     }
 }
